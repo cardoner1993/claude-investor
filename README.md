@@ -7,36 +7,44 @@ This is an app built using [Reflex](https://github.com/reflex-dev/reflex). The A
 
 ## Prerequisites
 
-To run the code, you need to have an Anthropic API key. You can get one by signing up at [Anthropic](https://anthropic.com/).
+You need [Claude Code CLI](https://claude.ai/code) installed and logged in. No API key required — the app calls the `claude` CLI directly, which uses your existing Claude Code session for authentication.
+
+```bash
+# Install Claude Code if you haven't already, then log in:
+claude login
+```
 
 ## Requirements
 
-As specified in the pyproject.toml file, the following packages are required to run the code:
+Managed via Poetry (`pyproject.toml`). Install with:
 
-```txt
-yfinance
-requests
-beautifulsoup4
-reflex==0.4.5
+```bash
+poetry install
 ```
-
-These are the defaults added by poetry. Relaxed versions of some of these packages likely work as well.
 
 ## Environment variables
 
-The app reads two environment variables `ANTHROPIC_API_KEY` and `MAX_TICKERS_TO_ANALYZE`. `MAX_TICKERS_TO_ANALYZE` is part of the prompt to Claude for how many tickers it returns for further analysis, defaults to `4` right now. The analysis takes a bit of time to run.
-
-```bash
-export ANTHROPIC_API_KEY="your_api_key"
-```
+The app reads one optional environment variable `MAX_TICKERS_TO_ANALYZE`. It controls how many tickers Claude searches for per industry, defaults to `4`.
 
 ## Running the app
 
-This app is based on [Reflex](https://github.com/reflex-dev/reflex) framework. In the top level directory (this directory has a file named `rxconfig.py`), run the following commands to run the app:
+`reflex` is installed inside the `claude-investor` pyenv virtualenv, so activate it first:
+
+```bash
+pyenv activate claude-investor
+```
+
+Then initialise (first time only) and run:
 
 ```bash
 reflex init
 reflex run
+```
+
+To pass environment variables:
+
+```bash
+MAX_TICKERS_TO_ANALYZE=6 reflex run
 ```
 
 Also check out [Reflex Documentation](https://reflex.dev/docs/getting-started/introduction/) to build/run/host your own app.

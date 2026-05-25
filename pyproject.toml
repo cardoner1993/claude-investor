@@ -7,11 +7,25 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
-reflex = "^0.4.5"
-yfinance = "^0.2.37"
+reflex = "^0.9.2"
+yfinance = "^1.0"
 requests = "^2.31.0"
 beautifulsoup4 = "^4.12.3"
+markdown = "^3.0"
+cachetools = "^5.0"
+vaderSentiment = "^3.3.2"
+pydantic = "^2.7"
+json-repair = "^0.30"
+loguru = "^0.7"
+python-dotenv = "^1.0"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.pytest.ini_options]
+markers = [
+    "network: tests that require network access (skip with -m 'not network')",
+]
 
 [build-system]
 requires = ["poetry-core"]

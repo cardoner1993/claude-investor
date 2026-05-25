@@ -1,4 +1,0 @@
-yfinance
-requests
-beautifulsoup4
-reflex==0.4.5

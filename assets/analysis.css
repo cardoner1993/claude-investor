@@ -1,0 +1,6 @@
+.md-analysis { font-size: 0.9rem; line-height: 1.7; color: var(--gray-12); }
+.md-analysis p { margin: 0.5em 0; }
+.md-analysis strong { color: var(--amber-11); font-weight: 600; }
+.md-analysis ul { margin: 0.4em 0 0.4em 1.4em; padding: 0; }
+.md-analysis li { margin: 0.2em 0; }
+.md-analysis br { display: block; margin: 0.2em 0; content: ""; }
