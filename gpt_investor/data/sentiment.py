@@ -19,17 +19,10 @@ LLM is weighted slightly higher because VADER misses finance idioms
 prevents it from drifting unchecked.
 """
 
-import json
-import re
-
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 
 _vader = SentimentIntensityAnalyzer()
-
-# Fenced JSON block extractor. We accept ```json ... ``` or a bare {...} block.
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
-_BARE_JSON_RE = re.compile(r"\{[^{}]*\"score\"[^{}]*\}", re.DOTALL)
 
 
 def score_articles_with_vader(articles: list[dict]) -> tuple[float, int]:
@@ -50,35 +43,6 @@ def score_articles_with_vader(articles: list[dict]) -> tuple[float, int]:
     if not scores:
         return 0.0, 0
     return round(sum(scores) / len(scores), 3), len(scores)
-
-
-def parse_llm_json(text: str) -> dict | None:
-    """Extract a JSON object from LLM output.
-
-    The model sometimes wraps in ```json fences, sometimes inlines a bare
-    object. We try fenced first, then bare, then any JSON-decodable block.
-    Returns None if no valid score-bearing JSON found.
-    """
-    if not text:
-        return None
-    m = _JSON_BLOCK_RE.search(text)
-    candidates: list[str] = []
-    if m:
-        candidates.append(m.group(1))
-    m2 = _BARE_JSON_RE.search(text)
-    if m2:
-        candidates.append(m2.group(0))
-    # last-resort: try the whole string
-    candidates.append(text.strip())
-
-    for c in candidates:
-        try:
-            obj = json.loads(c)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and "score" in obj:
-            return obj
-    return None
 
 
 def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:

@@ -416,28 +416,104 @@ def get_yf_industry_groups() -> list[tuple[str, list[tuple[str, str]]]]:
     return [results[key] for key, _ in _YF_SECTOR_ORDER if key in results]
 
 
-def resolve_ticker(query: str) -> str | None:
+def _name_of(q: dict) -> str:
+    return (q.get("longname") or q.get("longName")
+            or q.get("shortname") or q.get("shortName") or "")
+
+
+def _score_quote(query: str, q: dict) -> float:
+    """Rank a yfinance Search quote by how well it matches `query`.
+
+    Sum of:
+      * `SequenceMatcher` ratio between query and longName/shortName  (0-1)
+      * symbol-exact-match bonus                                       (0-1)
+      * token-overlap bonus (query words present in name)              (0-0.3)
+    Higher = better.
     """
-    Resolve a ticker symbol or company name to a canonical YF ticker.
-    'CEG' → 'CEG', 'Constellation Energy' → 'CEG'.
-    Returns None if nothing found.
+    import difflib
+
+    q_low = query.lower().strip()
+    q_words = q_low.split()
+    q_first = q_words[0] if q_words else q_low
+    name = _name_of(q).lower()
+    sym = (q.get("symbol") or "").lower()
+    sym_base = sym.split(".")[0]  # ACS.MC → "acs"
+
+    name_score = difflib.SequenceMatcher(None, q_low, name).ratio() if name else 0.0
+    if sym == q_low:
+        sym_score = 1.0
+    elif sym_base == q_low:  # query is bare ticker "ACS" → ACS.MC matches
+        sym_score = 0.9
+    elif sym_base == q_first:  # query is "ACS Actividades..." → ACS.MC matches first word
+        sym_score = 0.4
+    elif sym.startswith(q_low):
+        sym_score = 0.5
+    else:
+        sym_score = 0.0
+
+    q_tokens = {t for t in q_words if len(t) > 1}
+    n_tokens = set(name.split())
+    overlap = (len(q_tokens & n_tokens) / len(q_tokens)) * 0.3 if q_tokens else 0.0
+
+    return max(name_score, sym_score) + overlap
+
+
+def resolve_ticker_verbose(query: str) -> dict | None:
+    """Resolve `query` to the best-matching ticker + return alternatives.
+
+    Returns `{symbol, name, exchange, score, alternatives}` or None if no
+    candidates. Allows dot-tickers (`ACS.MC`, `BMW.DE`) — picks whichever
+    EQUITY scores highest by name match, not the first dotless one.
+
+    `alternatives` is a list of `(symbol, name, score)` tuples for the
+    next-best matches, useful for surfacing to the user when the top
+    pick looks wrong.
     """
     query = query.strip()
     if not query:
         return None
     try:
-        quotes = yf.Search(query, max_results=5).quotes
-        for q in quotes:
-            sym = q.get("symbol", "")
-            # Prefer equity quotes without dots (avoid ETFs like "BRK.B" if searching "Berkshire")
-            if sym and q.get("quoteType", "") == "EQUITY" and "." not in sym:
-                logger.info("resolve_ticker '{}' → {} ({})", query, sym, q.get("shortName", ""))
-                return sym
-        # Fallback: first result regardless of type
-        if quotes:
-            sym = quotes[0].get("symbol", "")
-            logger.info("resolve_ticker '{}' → {} (fallback)", query, sym)
-            return sym or None
+        quotes = yf.Search(query, max_results=10).quotes
     except Exception as e:
         logger.warning("resolve_ticker '{}' failed: {}", query, e)
-    return None
+        return None
+
+    if not quotes:
+        return None
+
+    equities = [q for q in quotes if q.get("quoteType", "") == "EQUITY"]
+    candidates = equities or quotes
+
+    scored = sorted(
+        ((q, _score_quote(query, q)) for q in candidates),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    top_q, top_score = scored[0]
+    sym = top_q.get("symbol", "")
+    if not sym:
+        return None
+
+    alternatives = [
+        (q.get("symbol", ""), _name_of(q), round(score, 2))
+        for q, score in scored[1:5]
+        if q.get("symbol")
+    ]
+    logger.info(
+        "resolve_ticker '{}' → {} (score={:.2f}, name={!r})  alts: {}",
+        query, sym, top_score, _name_of(top_q),
+        ", ".join(f"{s}({sc:.2f})" for s, _, sc in alternatives) or "none",
+    )
+    return {
+        "symbol": sym,
+        "name": _name_of(top_q),
+        "exchange": top_q.get("exchange", ""),
+        "score": round(top_score, 2),
+        "alternatives": alternatives,
+    }
+
+
+def resolve_ticker(query: str) -> str | None:
+    """Back-compat wrapper — returns only the top symbol or None."""
+    info = resolve_ticker_verbose(query)
+    return info["symbol"] if info else None

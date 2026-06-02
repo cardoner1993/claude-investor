@@ -21,6 +21,7 @@ from gpt_investor.data.market_data import (
 from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals, format_fundamentals
 from gpt_investor.data.market_regime import get_market_regime
 from gpt_investor.data.sentiment import chip_label, chip_color, format_for_llm as format_sentiment_for_llm
+from gpt_investor.data.discovery import resolve_ticker_verbose as _resolve_verbose_fn
 from gpt_investor.data.discovery import (
     MAX_TICKERS_TO_ANALYZE,
     generate_ticker_ideas,
@@ -70,6 +71,12 @@ async def _analyze_ticker(
     """
     ticker_start = time.time()
     try:
+        if state.cancel_requested:
+            _log(ticker, "cancelled before start")
+            async with state:
+                state.tickers[ticker] = "cancelled"
+            return
+
         async with state:
             state.tickers[ticker] = "processing"
 
@@ -98,7 +105,6 @@ async def _analyze_ticker(
                 state.tickers[ticker] = "cached"
                 if state.selected_ticker == ticker:
                     state.selected_name = name
-                    state.selected_analysis = final_analysis
                     state.selected_analysis_html = md_lib.markdown(
                         final_analysis, extensions=["nl2br", "sane_lists"]
                     )
@@ -138,6 +144,12 @@ async def _analyze_ticker(
             state.sent_color[ticker] = chip_color(sentiment["score"], sentiment["confidence"])
             state.sent_block[ticker] = sent_block
 
+        if state.cancel_requested:
+            _log(ticker, "cancelled before sonnet")
+            async with state:
+                state.tickers[ticker] = "cancelled"
+            return
+
         # Await the industry analysis only now (started in parallel by fetch_analyses).
         # On any error or if caller didn't start one (all-cached run interrupted by a
         # late miss — shouldn't happen but guard anyway), fall back to empty string.
@@ -169,7 +181,6 @@ async def _analyze_ticker(
             state.cache_read_tokens = totals["cache_read"]
             if state.selected_ticker == ticker:
                 state.selected_name = name
-                state.selected_analysis = final_analysis
                 state.selected_analysis_html = md_lib.markdown(
                     final_analysis, extensions=["nl2br", "sane_lists"]
                 )
@@ -204,14 +215,20 @@ class State(rx.State):
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
     error_message: str = ""
+    # stage values: "stopped" | "confirming" | "analyzing" | "done"
     stage: str = "stopped"
+    # Cooperative cancel — checked at await boundaries in fetch_analyses + _analyze_ticker
+    cancel_requested: bool = False
+    # Pending ticker-resolution confirmation (single-company mode).
+    # Each candidate is [symbol, name, exchange] — list-of-lists for
+    # Reflex serialisation; user picks one to confirm, or edits the query.
+    pending_candidates: list[list[str]] = []
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     selected_ticker: str = ""
     selected_name: str = ""
     selected_is_cached: bool = False
-    selected_analysis: str = ""
     selected_analysis_html: str = ""
     selected_fund_html: str = ""
     selected_fund_summary: str = ""
@@ -224,7 +241,7 @@ class State(rx.State):
     def all_done(self) -> bool:
         return (
             len(self.tickers) > 0
-            and all(v in ("finished", "cached", "error") for v in self.tickers.values())
+            and all(v in ("finished", "cached", "error", "cancelled") for v in self.tickers.values())
         )
 
     def load_mock_data(self):
@@ -310,21 +327,11 @@ class State(rx.State):
         else:
             self.expanded_sectors.append(sector)
 
-    def quick_pick(self, label: str):
-        self.industry_input = label
-        self.industry = label
-        self.discovery_mode = "industry"
-        self.direct_yf_key = ""
-        self._reset_tickers()
-        self.stage = "analyzing"
-        return State.fetch_analyses
-
     def open_ticker(self, ticker: str):
         self.selected_ticker = ticker
         self.selected_name = self.names.get(ticker, "")
         self.selected_is_cached = self.tickers.get(ticker) == "cached"
         raw = self.analyses.get(ticker, "")
-        self.selected_analysis = raw
         self.selected_analysis_html = md_lib.markdown(raw, extensions=["nl2br", "sane_lists"])
         fund_block = self.fund_block.get(ticker, "")
         self.selected_fund_html = (
@@ -343,7 +350,6 @@ class State(rx.State):
         self.selected_ticker = ""
         self.selected_name = ""
         self.selected_is_cached = False
-        self.selected_analysis = ""
         self.selected_analysis_html = ""
         self.selected_fund_html = ""
         self.selected_fund_summary = ""
@@ -367,15 +373,82 @@ class State(rx.State):
         self.company_query = value
 
     def handle_company_submit(self, data: dict):
+        """Resolve the query → ticker, then PAUSE for user confirmation.
+
+        Going straight to analysis on ambiguous queries used to surface the
+        wrong ticker silently (e.g. "ACS" → "GGAL"). Now the resolution is
+        shown to the user with alternatives; they hit Confirm to run or
+        Cancel/Edit to retype.
+        """
         query = data.get("company", "").strip()
-        if query:
-            self.industry = query
-            self.company_query = query
-            self.discovery_mode = "single"
-            self.direct_yf_key = ""
-            self._reset_tickers()
-            self.stage = "analyzing"
-            return State.fetch_analyses
+        if not query:
+            return
+
+        info = _resolve_verbose_fn(query)
+        if not info:
+            self.error_message = f"No company found for '{query}'"
+            self.stage = "stopped"
+            self._clear_pending()
+            return
+
+        # Build up to 3 candidates: top pick + best alternatives.
+        candidates: list[list[str]] = [[
+            info["symbol"],
+            info["name"] or "(no name)",
+            info.get("exchange", ""),
+        ]]
+        for sym, name, _ in info.get("alternatives", [])[:2]:
+            if sym and sym != info["symbol"]:
+                candidates.append([sym, name or "(no name)", ""])
+
+        self.company_query = query
+        self.pending_candidates = candidates
+        self.error_message = ""
+        self.stage = "confirming"
+
+    def confirm_pending_with(self, ticker: str):
+        """User picked one of the candidates — kick off the pipeline on that ticker."""
+        if not ticker:
+            return
+        self.industry = ticker
+        self.company_query = ticker  # use ticker downstream, not the original query
+        self.discovery_mode = "single"
+        self.direct_yf_key = ""
+        self._reset_tickers()
+        self.stage = "analyzing"
+        self.cancel_requested = False
+        self._clear_pending()
+        return State.fetch_analyses
+
+    def cancel_pending(self):
+        """User rejected the resolved ticker — back to the search form."""
+        self._clear_pending()
+        self.stage = "stopped"
+
+    def cancel_analysis(self):
+        """Request cooperative cancellation of a running fetch_analyses run.
+
+        Sets a flag the background task polls at await boundaries. In-flight
+        tickers see it and short-circuit before their next slow step.
+        """
+        if self.stage != "analyzing":
+            return
+        self.cancel_requested = True
+        logger.info("cancel requested by user")
+
+    def _clear_pending(self):
+        self.pending_candidates = []
+
+    async def _mark_cancelled(self, where: str):
+        """Called from inside the background task when cancel_requested is set."""
+        logger.warning("run cancelled by user ({})", where)
+        async with self:
+            for t in list(self.tickers):
+                if self.tickers[t] in ("pending", "processing"):
+                    self.tickers[t] = "cancelled"
+            self.error_message = "Cancelled by user"
+            self.stage = "stopped"
+            self.cancel_requested = False
 
     @rx.event(background=True)
     async def fetch_analyses(self):
@@ -427,6 +500,10 @@ class State(rx.State):
         need_liquidity = need_fetch  # preserved name for downstream state update
         logger.info("run tickers: {}  ({:.1f}s)", list(tickers_dict.keys()), time.time() - t)
         logger.info("run liquidity: {}", liquidity_source)
+
+        if self.cancel_requested:
+            await self._mark_cancelled("after discovery + liquidity")
+            return
 
         if not tickers_dict:
             async with self:
@@ -483,6 +560,12 @@ class State(rx.State):
             self.input_tokens = totals["input"]
             self.output_tokens = totals["output"]
             self.cache_read_tokens = totals["cache_read"]
+
+        if self.cancel_requested:
+            if industry_task is not None:
+                industry_task.cancel()
+            await self._mark_cancelled("before ticker fan-out")
+            return
 
         t = time.time()
         await asyncio.gather(*[

@@ -1,14 +1,12 @@
 """Unit tests for the quantified sentiment module.
 
 VADER scoring uses real text but the lexicon is deterministic, so the tests
-are stable. LLM JSON parsing + combiner are pure logic.
+are stable. The combiner is pure logic. JSON parsing is now Pydantic-based
+and covered by `tests/test_verdict_schema.py` + the structured-call path.
 """
-
-import pytest
 
 from gpt_investor.data.sentiment import (
     score_articles_with_vader,
-    parse_llm_json,
     combine_sentiment,
     chip_label,
     chip_color,
@@ -52,38 +50,6 @@ def test_vader_skips_articles_with_no_text():
     score, n = score_articles_with_vader(arts)
     assert n == 1
     assert score > 0  # the one valid article is positive
-
-
-# --- LLM JSON parsing -----------------------------------------------------
-
-def test_parse_fenced_json_block():
-    text = 'Some prose.\n```json\n{"score": 0.5, "drivers": ["a", "b"], "summary": "ok"}\n```\nTrailing.'
-    obj = parse_llm_json(text)
-    assert obj == {"score": 0.5, "drivers": ["a", "b"], "summary": "ok"}
-
-
-def test_parse_bare_json_object():
-    text = 'Here is the analysis: {"score": -0.2, "drivers": ["x"], "summary": "neg"} and more text.'
-    obj = parse_llm_json(text)
-    assert obj is not None
-    assert obj["score"] == -0.2
-
-
-def test_parse_pure_json_string():
-    obj = parse_llm_json('{"score": 0.0, "drivers": [], "summary": ""}')
-    assert obj is not None
-    assert obj["score"] == 0.0
-
-
-def test_parse_returns_none_for_garbage():
-    assert parse_llm_json("This is just prose with no JSON.") is None
-    assert parse_llm_json("") is None
-    assert parse_llm_json("{not valid json at all}") is None
-
-
-def test_parse_requires_score_field():
-    # JSON exists but lacks `score`, so it's not a sentiment payload.
-    assert parse_llm_json('{"summary": "no score here"}') is None
 
 
 # --- combiner -------------------------------------------------------------
