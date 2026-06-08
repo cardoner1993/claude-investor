@@ -123,6 +123,8 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     fund_color = State.fund_color[ticker]
     sent_summary = State.sent_summary[ticker]
     sent_color = State.sent_color[ticker]
+    wyck_summary = State.wyck_summary[ticker]
+    wyck_color = State.wyck_color[ticker]
 
     return rx.card(
         rx.vstack(
@@ -145,6 +147,11 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
             rx.cond(
                 sent_summary != "",
                 rx.badge(sent_summary, color_scheme=sent_color, variant="soft", radius="full", size="1"),
+                rx.fragment(),
+            ),
+            rx.cond(
+                wyck_summary != "",
+                rx.badge(wyck_summary, color_scheme=wyck_color, variant="outline", radius="full", size="1"),
                 rx.fragment(),
             ),
             rx.cond(
@@ -248,6 +255,16 @@ def analysis_dialog() -> rx.Component:
                                     ),
                                     rx.fragment(),
                                 ),
+                                rx.cond(
+                                    State.selected_wyck_summary != "",
+                                    rx.badge(
+                                        State.selected_wyck_summary,
+                                        color_scheme=State.selected_wyck_color,
+                                        variant="outline",
+                                        radius="full",
+                                    ),
+                                    rx.fragment(),
+                                ),
                                 spacing="2",
                                 padding_bottom="0.5em",
                             ),
@@ -256,6 +273,14 @@ def analysis_dialog() -> rx.Component:
                                 State.selected_sent_html != "",
                                 rx.box(
                                     analysis_html_renderer(html=State.selected_sent_html),
+                                    padding_top="0.8em",
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.cond(
+                                State.selected_wyck_html != "",
+                                rx.box(
+                                    analysis_html_renderer(html=State.selected_wyck_html),
                                     padding_top="0.8em",
                                 ),
                                 rx.fragment(),

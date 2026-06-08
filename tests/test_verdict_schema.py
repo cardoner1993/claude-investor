@@ -18,6 +18,7 @@ def _valid_payload(**overrides):
         "sentiment_addressed": "+0.42 high confirms market read.",
         "industry_addressed": "Sector tailwind from AI capex cycle.",
         "macro_addressed": "Easing Fed reduces equity discount rate.",
+        "technical_addressed": "Markup phase confirms entry timing.",
     }
     base.update(overrides)
     return base
@@ -57,7 +58,7 @@ def test_positives_min_length_enforced():
 
 def test_addressed_fields_cannot_be_empty():
     for field in ("fundamentals_addressed", "sentiment_addressed",
-                  "industry_addressed", "macro_addressed"):
+                  "industry_addressed", "macro_addressed", "technical_addressed"):
         with pytest.raises(ValidationError):
             VerdictLLM.model_validate(_valid_payload(**{field: ""}))
 
@@ -83,6 +84,7 @@ def test_render_includes_all_sections():
     assert "_Sentiment_: +0.42 high" in md
     assert "_Industry_: Sector tailwind" in md
     assert "_Macro_: Easing Fed" in md
+    assert "_Technical_: Markup phase" in md
 
 
 def test_render_handles_null_price_target():

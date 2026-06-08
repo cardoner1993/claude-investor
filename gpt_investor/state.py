@@ -20,6 +20,7 @@ from gpt_investor.data.market_data import (
 )
 from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals, format_fundamentals
 from gpt_investor.data.market_regime import get_market_regime
+from gpt_investor.data.wyckoff import score_ticker as score_wyckoff_ticker, format_wyckoff
 from gpt_investor.data.sentiment import chip_label, chip_color, format_for_llm as format_sentiment_for_llm
 from gpt_investor.data.discovery import resolve_ticker_verbose as _resolve_verbose_fn
 from gpt_investor.data.discovery import (
@@ -83,10 +84,11 @@ async def _analyze_ticker(
         cached = get_cached(ticker)
         if cached:
             _log(ticker, "cache hit — skipping pipeline")
-            price, name, fund_raw = await asyncio.gather(
+            price, name, fund_raw, wyck = await asyncio.gather(
                 asyncio.to_thread(get_current_price, ticker),
                 asyncio.to_thread(get_company_name, ticker),
                 asyncio.to_thread(fetch_fundamentals, ticker),
+                asyncio.to_thread(score_wyckoff_ticker, ticker),
             )
             scored = score_fundamentals(fund_raw)
             fund_block = format_fundamentals(scored)
@@ -98,6 +100,9 @@ async def _analyze_ticker(
                 state.fund_summary[ticker] = f"{scored['tier']} {scored['score']}"
                 state.fund_color[ticker] = _TIER_COLORS.get(scored["tier"], "gray")
                 state.fund_block[ticker] = fund_block
+                state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
+                state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
+                state.wyck_block[ticker] = format_wyckoff(wyck)
                 if sentiment_dict:
                     state.sent_summary[ticker] = chip_label(sentiment_dict["score"], sentiment_dict["confidence"])
                     state.sent_color[ticker] = chip_color(sentiment_dict["score"], sentiment_dict["confidence"])
@@ -118,16 +123,18 @@ async def _analyze_ticker(
 
         _log(ticker, "running sentiment + ratings + price + fundamentals (parallel)")
         t = time.time()
-        sentiment, analyst_ratings, price, name, fund_raw = await asyncio.gather(
+        sentiment, analyst_ratings, price, name, fund_raw, wyck = await asyncio.gather(
             asyncio.to_thread(get_sentiment_analysis, ticker, news),
             asyncio.to_thread(get_analyst_ratings, ticker),
             asyncio.to_thread(get_current_price, ticker),
             asyncio.to_thread(get_company_name, ticker),
             asyncio.to_thread(fetch_fundamentals, ticker),
+            asyncio.to_thread(score_wyckoff_ticker, ticker),
         )
         scored = score_fundamentals(fund_raw)
         fund_block = format_fundamentals(scored)
         sent_block = format_sentiment_for_llm(sentiment)
+        wyck_block = format_wyckoff(wyck)
         _log(
             ticker,
             f"all parallel done  price={price:.2f}  fund={scored['tier']} {scored['score']}  "
@@ -143,6 +150,9 @@ async def _analyze_ticker(
             state.sent_summary[ticker] = chip_label(sentiment["score"], sentiment["confidence"])
             state.sent_color[ticker] = chip_color(sentiment["score"], sentiment["confidence"])
             state.sent_block[ticker] = sent_block
+            state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
+            state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
+            state.wyck_block[ticker] = wyck_block
 
         if state.cancel_requested:
             _log(ticker, "cancelled before sonnet")
@@ -165,7 +175,7 @@ async def _analyze_ticker(
         final_analysis = await asyncio.to_thread(
             get_final_analysis,
             ticker, price, sentiment, analyst_ratings,
-            industry_analysis, liquidity_context, scored, regime,
+            industry_analysis, liquidity_context, scored, regime, wyck,
         )
         _log(ticker, "final analysis done", time.time() - t)
 
@@ -211,6 +221,9 @@ class State(rx.State):
     sent_summary: dict[str, str] = {}   # ticker -> "+0.42 high"
     sent_color: dict[str, str] = {}     # ticker -> Radix color
     sent_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
+    wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
+    wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
     liquidity_context: str = ""
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
@@ -236,6 +249,9 @@ class State(rx.State):
     selected_sent_html: str = ""
     selected_sent_summary: str = ""
     selected_sent_color: str = ""
+    selected_wyck_html: str = ""
+    selected_wyck_summary: str = ""
+    selected_wyck_color: str = ""
 
     @rx.var
     def all_done(self) -> bool:
@@ -266,6 +282,9 @@ class State(rx.State):
         self.sent_summary = {"MOCK": "+0.42 high"}
         self.sent_color = {"MOCK": "green"}
         self.sent_block = {"MOCK": "**Sentiment**: score +0.42 (high confidence) — VADER +0.30, LLM +0.50\n\nUpbeat coverage on product launches and analyst upgrades.\n\n- Bull: new product ramp\n- Bull: margin expansion\n- Bear: regulator probe ongoing"}
+        self.wyck_summary = {"MOCK": "markup 8.0"}
+        self.wyck_color = {"MOCK": "green"}
+        self.wyck_block = {"MOCK": "**Wyckoff timing: 8.0/10 (Strong) — phase: markup**\n_confirmed uptrend — buyers in control_\n\n- Trend: up (price +12.0% vs 200d SMA)\n- Volume: 5d/50d 1.80x (surge), up/down bias +30.0%"}
         mock_liquidity = (
             "**Global Liquidity Snapshot**\n\n"
             "**Fed (US)**: 4.50% — neutral — Holding rates steady with gradual QT continuing.\n"
@@ -288,6 +307,9 @@ class State(rx.State):
         self.sent_summary = {}
         self.sent_color = {}
         self.sent_block = {}
+        self.wyck_summary = {}
+        self.wyck_color = {}
+        self.wyck_block = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -345,6 +367,12 @@ class State(rx.State):
         )
         self.selected_sent_summary = self.sent_summary.get(ticker, "")
         self.selected_sent_color = self.sent_color.get(ticker, "")
+        wyck_block = self.wyck_block.get(ticker, "")
+        self.selected_wyck_html = (
+            md_lib.markdown(wyck_block, extensions=["nl2br", "sane_lists"]) if wyck_block else ""
+        )
+        self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
+        self.selected_wyck_color = self.wyck_color.get(ticker, "")
 
     def close_ticker(self):
         self.selected_ticker = ""
@@ -357,6 +385,9 @@ class State(rx.State):
         self.selected_sent_html = ""
         self.selected_sent_summary = ""
         self.selected_sent_color = ""
+        self.selected_wyck_html = ""
+        self.selected_wyck_summary = ""
+        self.selected_wyck_color = ""
 
     def handle_submit(self, data: dict):
         industry = data.get("industry", "").strip()

@@ -6,6 +6,7 @@ from gpt_investor.llm.claude import call_claude, call_claude_structured
 from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals, format_fundamentals
 from gpt_investor.data.macro import get_liquidity_snapshot, format_liquidity, snapshot_is_complete
 from gpt_investor.data.market_regime import format_regime
+from gpt_investor.data.wyckoff import format_wyckoff
 from gpt_investor.data.market_data import _fetch_article_text
 from gpt_investor.llm.schemas import SentimentLLM, VerdictLLM, render_verdict_markdown
 from gpt_investor.data.sentiment import (
@@ -117,6 +118,7 @@ def get_final_analysis(
     liquidity_context: str = "",
     fundamentals: dict | None = None,
     regime: dict | None = None,
+    wyckoff: dict | None = None,
 ):
     """Run final Buy/Hold/Sell verdict.
 
@@ -131,6 +133,10 @@ def get_final_analysis(
     `regime` is the dict returned by `market_regime.get_market_regime()`.
     When supplied, it's rendered into the user message and the system
     prompt forces sonnet to address macro impact (or declare it immaterial).
+
+    `wyckoff` is the dict returned by `wyckoff.score_wyckoff()` — the
+    deterministic price/volume timing layer. When supplied, it's rendered
+    between the micro and macro blocks and the model must address it.
     """
     if fundamentals is None:
         fundamentals = score_fundamentals(fetch_fundamentals(ticker))
@@ -142,10 +148,14 @@ def get_final_analysis(
         sentiment_block = str(sentiment)
 
     regime_block = format_regime(regime) if regime else ""
+    wyckoff_block = format_wyckoff(wyckoff) if wyckoff else ""
 
     system_prompt = (
         "You are a concise, opinionated financial analyst. "
         "Weigh the deterministic fundamental score heavily — it is not LLM-generated. "
+        "The Wyckoff timing score is also deterministic: treat it as the timing "
+        "overlay on the fundamental case — a strong company in markdown/distribution "
+        "is the right name at the wrong time; accumulation/markup confirms entry. "
         "Emit ONE JSON object matching the schema. "
         "Thesis must reference the fundamental tier explicitly. "
         "For every `*_addressed` field, write ONE sentence on how that input "
@@ -159,6 +169,7 @@ def get_final_analysis(
         f"Sentiment:\n{sentiment_block}\n\n"
         f"Analyst ratings:\n{analyst_ratings}\n\n"
         f"Industry context:\n{industry_analysis}\n\n"
+        + (f"Technical / Wyckoff timing:\n{wyckoff_block}\n\n" if wyckoff_block else "")
         + (f"Macro liquidity context:\n{liquidity_context}\n\n" if liquidity_context else "")
         + (f"Market regime:\n{regime_block}\n\n" if regime_block else "")
         + "Give your investment recommendation as the structured verdict."
@@ -181,13 +192,14 @@ def get_final_analysis(
         return ""
 
     logger.bind(ticker=ticker).info(
-        "verdict={} conf={} target={}  fund='{}'  sent='{}'  ind='{}'  macro='{}'",
+        "verdict={} conf={} target={}  fund='{}'  sent='{}'  ind='{}'  macro='{}'  tech='{}'",
         parsed.verdict, parsed.confidence,
         f"${parsed.price_target:.2f}" if parsed.price_target is not None else "n/a",
         parsed.fundamentals_addressed[:60],
         parsed.sentiment_addressed[:60],
         parsed.industry_addressed[:60],
         parsed.macro_addressed[:60],
+        parsed.technical_addressed[:60],
     )
     return render_verdict_markdown(parsed, current_price)
 
