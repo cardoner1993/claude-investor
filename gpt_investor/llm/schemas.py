@@ -8,6 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# Bumped whenever `get_final_analysis`'s prompt / input set changes meaningfully.
+# Phase 2's verdict_history filters on this so calibration never mixes contracts;
+# verdict.py (P2) imports this constant rather than redefining it.
+#   v1 — fundamentals + sentiment + industry + macro/regime
+#   v2 — adds the Wyckoff timing layer + technical_addressed audit field (PW)
+PROMPT_VERSION = "v2"
+
 
 class SentimentLLM(BaseModel):
     """Finance-aware sentiment emitted by the LLM (pre-combination with VADER)."""
@@ -68,6 +75,11 @@ class VerdictLLM(BaseModel):
         max_length=300,
         description="How macro/liquidity/regime context informed the verdict, or 'no impact'",
     )
+    technical_addressed: str = Field(
+        min_length=4,
+        max_length=300,
+        description="How the Wyckoff price/volume phase informed the verdict, or 'no impact'",
+    )
 
 
 def render_verdict_markdown(v: VerdictLLM, current_price: float) -> str:
@@ -85,5 +97,7 @@ def render_verdict_markdown(v: VerdictLLM, current_price: float) -> str:
         f"- _Fundamentals_: {v.fundamentals_addressed}\n"
         f"- _Sentiment_: {v.sentiment_addressed}\n"
         f"- _Industry_: {v.industry_addressed}\n"
-        f"- _Macro_: {v.macro_addressed}"
+        f"- _Macro_: {v.macro_addressed}\n"
+        # `technical_addressed` defaults on verdicts produced before PW shipped.
+        f"- _Technical_: {getattr(v, 'technical_addressed', 'no impact')}"
     )

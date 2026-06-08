@@ -21,11 +21,51 @@ python-dotenv = "^1.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"
+black = "^25.1"
+ruff = "^0.8"
 
 [tool.pytest.ini_options]
 markers = [
     "network: tests that require network access (skip with -m 'not network')",
 ]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = '''
+/(
+  \.web
+  | \.venv
+  | \.states
+  | logs
+  | reflex\.lock
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".web", ".states", "logs", "reflex.lock"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",  # line length — black handles it
+    "B008",  # function call in default arg (FastAPI/Reflex pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]                      # allow `assert False` style in tests
+"gpt_investor/ui/components.py" = ["F841"]  # @rx.memo signature requires param even when unused
 
 [build-system]
 requires = ["poetry-core"]

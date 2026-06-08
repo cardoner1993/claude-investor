@@ -123,6 +123,8 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     fund_color = State.fund_color[ticker]
     sent_summary = State.sent_summary[ticker]
     sent_color = State.sent_color[ticker]
+    wyck_summary = State.wyck_summary[ticker]
+    wyck_color = State.wyck_color[ticker]
 
     return rx.card(
         rx.vstack(
@@ -148,6 +150,11 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
                 rx.fragment(),
             ),
             rx.cond(
+                wyck_summary != "",
+                rx.badge(wyck_summary, color_scheme=wyck_color, variant="outline", radius="full", size="1"),
+                rx.fragment(),
+            ),
+            rx.cond(
                 status == "cached",
                 rx.badge("Cached", color_scheme="blue", variant="soft", radius="full"),
                 rx.cond(
@@ -159,7 +166,11 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
                         rx.cond(
                             status == "error",
                             rx.badge("Error", color_scheme="red", variant="soft", radius="full"),
-                            rx.badge("Pending", color_scheme="gray", variant="soft", radius="full"),
+                            rx.cond(
+                                status == "cancelled",
+                                rx.badge("Cancelled", color_scheme="gray", variant="soft", radius="full"),
+                                rx.badge("Pending", color_scheme="gray", variant="soft", radius="full"),
+                            ),
                         ),
                     ),
                 ),
@@ -244,6 +255,16 @@ def analysis_dialog() -> rx.Component:
                                     ),
                                     rx.fragment(),
                                 ),
+                                rx.cond(
+                                    State.selected_wyck_summary != "",
+                                    rx.badge(
+                                        State.selected_wyck_summary,
+                                        color_scheme=State.selected_wyck_color,
+                                        variant="outline",
+                                        radius="full",
+                                    ),
+                                    rx.fragment(),
+                                ),
                                 spacing="2",
                                 padding_bottom="0.5em",
                             ),
@@ -252,6 +273,14 @@ def analysis_dialog() -> rx.Component:
                                 State.selected_sent_html != "",
                                 rx.box(
                                     analysis_html_renderer(html=State.selected_sent_html),
+                                    padding_top="0.8em",
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.cond(
+                                State.selected_wyck_html != "",
+                                rx.box(
+                                    analysis_html_renderer(html=State.selected_wyck_html),
                                     padding_top="0.8em",
                                 ),
                                 rx.fragment(),
@@ -329,22 +358,91 @@ def tickers_grid() -> rx.Component:
 
 
 def status_line() -> rx.Component:
-    return rx.cond(
-        State.all_done,
-        rx.hstack(
-            rx.icon("circle-check", size=16, color="green"),
-            rx.text("All done — click any ticker to read its analysis", size="2", color="gray"),
-            spacing="2",
-            align="center",
+    return rx.hstack(
+        rx.cond(
+            State.all_done,
+            rx.hstack(
+                rx.icon("circle-check", size=16, color="green"),
+                rx.text("All done — click any ticker to read its analysis", size="2", color="gray"),
+                spacing="2",
+                align="center",
+            ),
+            rx.cond(
+                State.discovery_mode == "trending",
+                rx.text("Analysing today's trending companies", size="2", color="gray"),
+                rx.cond(
+                    State.discovery_mode == "single",
+                    rx.text("Analysing ", State.company_query, size="2", color="gray"),
+                    rx.text("Analysing ", State.industry, " industry", size="2", color="gray"),
+                ),
+            ),
         ),
         rx.cond(
-            State.discovery_mode == "trending",
-            rx.text("Analysing today's trending companies", size="2", color="gray"),
-            rx.cond(
-                State.discovery_mode == "single",
-                rx.text("Analysing ", State.company_query, size="2", color="gray"),
-                rx.text("Analysing ", State.industry, " industry", size="2", color="gray"),
+            State.stage == "analyzing",
+            rx.button(
+                rx.icon("circle-stop", size=14),
+                "Stop",
+                on_click=State.cancel_analysis,
+                color_scheme="red",
+                variant="soft",
+                size="1",
             ),
+        ),
+        spacing="3",
+        align="center",
+        justify="center",
+        width="100%",
+    )
+
+
+def _candidate_row(cand: list[str]) -> rx.Component:
+    """One clickable row for the confirm panel: [symbol, name, exchange]."""
+    ticker = cand[0]
+    name = cand[1]
+    exchange = cand[2]
+    return rx.button(
+        rx.hstack(
+            rx.badge(ticker, color_scheme="amber", size="2", radius="medium"),
+            rx.text(name, size="2"),
+            rx.cond(
+                exchange != "",
+                rx.text("· ", exchange, size="1", color="gray"),
+            ),
+            spacing="2",
+            align="center",
+            width="100%",
+        ),
+        on_click=State.confirm_pending_with(ticker),
+        variant="soft",
+        color_scheme="gray",
+        size="2",
+        width="100%",
+        justify="start",
+    )
+
+
+def confirm_resolution_panel() -> rx.Component:
+    """Shown when the user typed a company name and we resolved candidates
+    but haven't started the analysis yet. They pick one or edit the query."""
+    return rx.cond(
+        State.stage == "confirming",
+        rx.vstack(
+            rx.text("Did you mean…?", size="2", color="gray", weight="medium"),
+            rx.foreach(State.pending_candidates, _candidate_row),
+            rx.button(
+                "Edit query",
+                on_click=State.cancel_pending,
+                color_scheme="gray",
+                variant="ghost",
+                size="1",
+            ),
+            spacing="2",
+            align="stretch",
+            padding="3",
+            border="1px solid var(--gray-a5)",
+            border_radius="6px",
+            width="100%",
+            max_width="600px",
         ),
     )
 

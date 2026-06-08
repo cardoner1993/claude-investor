@@ -6,6 +6,121 @@ Each phase is independently shippable. Don't start a phase until the one before 
 
 ---
 
+## The analysis pipeline (narrative framing)
+
+Read top to bottom — this is the story one ticker travels through before a verdict, plus the loop that checks whether the verdict was right. Each stage maps to a module that already exists or one the phases below will build. The build backlog (Phases D, 0–5) is the *how*; this section is the *what and why*.
+
+```
+[0] OVERVIEW   what's moving right now, what regime are we in
+       ↓
+[1] MACRO      central-bank stance + market regime (top-down filter)
+       ↓
+[2] MICRO      fundamentals + sentiment + analyst + industry (bottom-up)
+       ↓
+[3] WYCKOFF    price/volume structure — is the chart confirming the thesis?
+       ↓
+[4] DECISION   Buy/Hold/Sell verdict that must address every layer above
+       ↓
+[5] DATA LAYER record verdict + inputs → fill real outcomes → calibrate
+       ↑__________________________ feed back: "was the yes/no right?" ____|
+```
+
+### [0] Overview — *what is going on*
+
+What's actually moving in the market right now, gated by fresh news, plus the macro backdrop the user is walking into.
+
+| Piece | Module | Status |
+|---|---|---|
+| Signal-driven setups (tool-scored, not Yahoo-ranked) | `data/discovery.py` `get_setup_candidates` | **Phase PD' — not built** (today: weak `get_trending_tickers` "what's trendy on Yahoo") |
+| Trending industries / sector accordion | `data/discovery.py` | exists |
+| Liquidity + regime snapshot panel | `data/macro.py` + `data/market_regime.py` | exists |
+
+Output of this stage = the candidate set the user picks from. **Key change (PD'):** the "Today's Trending" mode is being replaced by "Today's Setups" — Yahoo screens become a cheap *candidate universe*, and the tool's own deterministic scores (fundamentals + Wyckoff + regime fit) decide what surfaces. See the Phase PD' block below.
+
+### [1] Macro — *top-down filter*
+
+Deterministic, no hallucinated numbers. Two sub-layers, both already built and already fed into the verdict:
+
+- **Central-bank stance** — `data/macro.py`: Fed (FRED) / ECB (SDW) / PBOC (ChinaMoney) policy rates, stance from 90-day delta. One LLM paragraph reads the *rendered* numbers only.
+- **Market regime** — `data/market_regime.py`: VIX, 10y−3m curve, DXY, HY credit (HYG), gold → 5-day deltas → regime label (`risk-on-bull` … `panic-opportunity`). Pure code-side classification.
+
+Status: **exists.** Refinements (regime tuning, more indicators) live in Phase 0.
+
+### [2] Micro — *bottom-up read*
+
+| Sub-layer | Module | Status |
+|---|---|---|
+| Fundamentals (5-dim deterministic score → tier) | `data/fundamentals.py` | exists |
+| Quantified sentiment (VADER + LLM combiner) | `data/sentiment.py` | exists |
+| Analyst ratings | `data/market_data.py` | exists |
+| Industry/sector analysis (WebSearch-grounded) | `llm/analysis.py` `get_industry_analysis` | exists |
+
+Status: **exists.** Higher-signal additions (short interest, insider flow, peer-relative valuation, multi-year trend) are Phase 4.
+
+### [3] Wyckoff — *is the chart confirming the thesis?* — **BUILT (GH #1)**
+
+The missing layer. Fundamentals say *what to own*; Wyckoff says *whether now*. Deterministic price/volume structure, modelled on `fundamentals.py` — pure Python, yfinance OHLCV only, no LLM, fully unit-testable.
+
+> **Status:** `data/wyckoff.py` shipped — `compute_signals` / `classify_phase` / `score_wyckoff` / `format_wyckoff` + `fetch_ohlcv` / `fetch_ohlcv_batch` / `score_ticker`. Wired into `_analyze_ticker` (both cache paths), `get_final_analysis`, `VerdictLLM.technical_addressed`, card chip (outline badge) + dialog block. `PROMPT_VERSION` → `v2` in `llm/schemas.py`. 23 unit tests in `tests/test_wyckoff.py` (144 offline total, all green).
+
+**Build — `gpt_investor/data/wyckoff.py`**
+
+- [x] `fetch_ohlcv(ticker, period="1y", interval="1d") -> DataFrame` — single `yf.Ticker(t).history`; tolerate short history; log + return empty on failure.
+- [x] `fetch_ohlcv_batch(tickers, period="1y") -> dict[str, DataFrame]` — multi-ticker `yf.download(group_by="ticker", threads=True)` (mirror `market_regime.py`). **Discovery (PD') scores ~60 names per refresh — a per-ticker loop = 60 history calls; the batch path collapses that to one.** Per-ticker `fetch_ohlcv` stays for single-company / card paths.
+- [x] `compute_signals(df) -> dict` — deterministic features:
+  - [x] trend: 50d vs 200d SMA (golden/death cross, % above/below 200d)
+  - [x] momentum: price vs 20d high/low, distance from 52w high/low
+  - [x] volume: 5d vs 50d average → `vol_surge` bool; up-volume vs down-volume bias
+  - [x] range: Bollinger/ATR-style band width → `consolidating` vs `expanding`
+  - [x] breakout: close breaching N-day range on a volume surge
+- [x] `classify_phase(signals) -> Literal["accumulation","markup","distribution","markdown","neutral"]` — Wyckoff-flavoured rule mapping (e.g. flat range + volume drying + above 200d → accumulation; new highs + rising volume → markup; first match wins, fall back to `neutral`). Pure function, ordered rules — the testable core. **These 5 labels are canonical — PD' ranks on this exact vocabulary (no "early-markup"; an early-markup setup reads as `accumulation` breaking out or fresh `markup`).**
+- [x] `score_wyckoff(signals, phase) -> dict` — `{phase, tier, score 0-10, flags}` where tier ∈ Strong/Solid/Average/Weak/Avoid (mirror fundamentals tiers so the card chip is consistent). Flags: `below 200d`, `distribution volume`, `overextended`, `no volume confirmation`, `thin history`.
+- [x] `format_wyckoff(scored) -> str` — markdown block for the verdict prompt + dialog.
+- [x] Tests `tests/test_wyckoff.py` — `classify_phase` + `score_wyckoff` against synthetic OHLCV/signal dicts (no yfinance hit), same style as `test_fundamentals.py`. **(23 cases; +`compute_signals` on synthetic DataFrames.)**
+
+**Wire-in**
+
+- [x] `state.py::_analyze_ticker`: add Wyckoff scoring (`score_ticker`) to the parallel `asyncio.gather` block in **both** the cache-hit and miss paths — publish a Wyckoff phase chip to the card alongside the fundamental tier chip.
+- [x] `llm/analysis.py::get_final_analysis`: pass `wyckoff` block in the user message between micro and macro; system prompt frames it as the timing overlay on the fundamental case.
+- [x] `llm/schemas.py::VerdictLLM`: add **required** `technical_addressed: str` field (hard audit parity with the other `_addressed` fields — no default). `render_verdict_markdown` still reads it via `getattr(..., 'no impact')` so old cached *rendered* verdicts (stored as markdown, never re-validated) display fine.
+  - [x] **PROMPT_VERSION ordering fix:** constant introduced in `llm/schemas.py` now (not waiting for P2's `verdict.py`); PW bumped it `v1` → `v2`. P2's `verdict.py` will import it rather than redefine.
+- [x] UI: Wyckoff phase chip on the card (outline badge) + block in the dialog (mirror the fundamental tier chip/block).
+
+**Decisions locked**
+- Deterministic only — no LLM in the Wyckoff module itself (the verdict LLM *reads* the rendered block, never invents the structure). Same contract as fundamentals/regime.
+- Daily bars, 1y window — no intraday/multi-timeframe (keeps it one cheap yfinance call). Revisit if phase detection proves too coarse.
+- Tier vocabulary reused from fundamentals (Strong…Avoid) so the card stays visually consistent.
+
+**Open questions**
+- Phase confidence score, or hard label only? (Lean: label + 0–10 score, like fundamentals.)
+- Divergence flag when Wyckoff phase contradicts fundamentals (strong fund + distribution phase = "right company, wrong time")? Natural follow-up once both chips exist.
+
+### [4] Decision — *invest in this trending company or not*
+
+`llm/analysis.py::get_final_analysis` → `VerdictLLM`. Sonnet sees every layer above and must emit a structured verdict where each `*_addressed` field justifies how that input moved the call (or `no impact`). The deterministic scores are weighted heavily and can't be hallucinated.
+
+Status: **exists + Wyckoff-aware** — `technical_addressed` (Stage 3) now forces the verdict to justify the chart phase, so all five inputs (fund, sentiment, industry, macro, technical) are audited. Probabilistic verdicts + pre-mortem are Phase 5.
+
+### [5] Data layer — *did the yes/no actually work?* — **largely not built**
+
+The point the user is driving at: today a verdict ships and we never learn if it was right. This stage closes the loop so both the user *and the LLM* can see, on the next similar setup, what happened last time.
+
+| Step | Module | Status |
+|---|---|---|
+| Parse `{verdict, target}` out of the LLM output | `verdict.py` | Phase 2A — not built |
+| Capture every verdict + all inputs + SPY benchmark | `verdict_history` table in `storage/cache.py` | Phase 2B — not built |
+| Nightly fill real 7/30/90/365d returns | `scripts/fill_outcomes.py` | Phase 2C — not built |
+| Calibration report (hit rate, alpha by tier/regime/phase) | `scripts/calibration.py` | Phase 2D — not built |
+| Audit agents critique verdict vs *similar past outcomes* | `audit.py` | Phase 3 — not built |
+
+**The feedback mechanism** (this is the "make the LLM understand what happened" part): once `verdict_history` has outcomes, the audit agents (Phase 3) and the verdict prompt itself retrieve the *k most similar past setups with their actual results* and inject them — "last 5 times fundamentals=Strong + regime=late-cycle + Wyckoff=distribution, the Buy verdicts averaged −4% vs SPY." The LLM now reasons against its own track record instead of in a vacuum. Wyckoff phase (Stage 3) becomes one of the similarity keys, so the data layer must add a `wyckoff_phase` + `wyckoff_score` column when Stage 3 ships.
+
+**Discipline** (cross-cutting, already noted below): never code-adjust the LLM verdict — keep it raw in `verdict_history` so calibration measures the model honestly. `PROMPT_VERSION` partitions data across prompt changes.
+
+> **Net: stages 0–2 and 4 exist today. The two pieces of net-new work this plan adds are [3] Wyckoff (the missing analytical layer) and [5] the data/feedback loop (so a "yes invest" / "no" becomes measurable and the LLM learns from it). Build sequencing for both is in the phases below.**
+
+---
+
 ## Done
 
 ### Hardening LLM grounding
@@ -37,6 +152,105 @@ Each phase is independently shippable. Don't start a phase until the one before 
 - [x] `_reset_tickers()` helper deduplicates 5 reset sites
 
 Tests at this point: **67 passing** (3 modules: parser, fundamentals, sentiment, url_verify).
+
+---
+
+## Phase PD' — Signal-driven discovery (replaces "trendy on Yahoo"; ~5h, no LLM)
+
+> **Supersedes the old Phase D (mover funnel).** Same data-fetch plumbing, *flipped ranking*. Phase D ranked candidates by **how much they moved** — still "what's hot on Yahoo." PD' ranks by **how good a setup the tool itself thinks they are**, using the deterministic layers already built (fundamentals) and planned (Wyckoff, regime). Yahoo's screens are demoted to a cheap *candidate universe* — they list tickers, they no longer decide which surface. **Depends on PW (Wyckoff) being built first** — Wyckoff phase is a ranking input.
+
+### Why "trendy on Yahoo" is the wrong signal
+
+Today `get_trending_tickers` (`discovery.py:273`) runs `yf.Search` over 5 fixed phrases and counts `relatedTickers` in the returned articles. The fundamental problem isn't *how* it measures trendiness — it's that **trendiness is the wrong target**. Surfacing what's already in the headlines means chasing moves that already happened. The tool has its own opinion (fundamentals tier, chart phase, regime fit) and should use it to surface *setups*, not echo the news cycle.
+
+### The flip
+
+```
+OLD (Phase D):   Yahoo lists hot tickers  →  rank by movement  →  surface
+NEW (PD'):       Yahoo lists a universe   →  score by the tool's OWN signals  →  surface setups
+```
+
+### Funnel design
+
+```
+1. UNIVERSE — Yahoo screens only LIST tickers (cheap, broad net, no ranking authority):
+     yf.screen("most_actives") + yf.screen("day_gainers") + yf.screen("day_losers")
+     + trending endpoint                              → ~100-200 raw symbols
+     (day_losers now INCLUDED — accumulation/basing names live there; the
+      Wyckoff filter sorts dip-buys from falling knives)
+2. EQUITY FILTER — drop "." / "-USD" (crypto) / "=" (FX) / "^" (index); upper-case, len<=5
+3. PRE-FILTER for cost — keep top ~60 by dollar-volume (price × volume) so we don't
+     run full fundamentals + OHLCV on 200 names every refresh
+4. SCORE each survivor — deterministic, NO LLM, reuse existing modules in parallel threads:
+     - fundamentals tier   (data/fundamentals.py  — score_fundamentals)
+     - wyckoff phase+score  (data/wyckoff.py       — score_wyckoff, Stage [3])
+     - regime fit           (data/market_regime.py — does this name suit current regime?)
+5. RANK by composite SETUP score, e.g.:
+     fund_score (0-10) * w_f  +  wyckoff_score (0-10) * w_w  +  regime_fit_bonus
+     with a soft gate: prefer fund >= Solid AND wyckoff in {accumulation, markup}
+6. TRUNCATE to MAX_TICKERS_TO_ANALYZE top setups, ranked
+7. Feed survivors into the existing per-ticker pipeline unchanged
+     (the scores computed here are REUSED — no re-fetch for the cards)
+```
+
+### What "regime fit" means (new small helper)
+
+A code-side rule, not an LLM call: given the current `market_regime.label`, prefer certain Wyckoff phases / fundamental profiles.
+- `risk-on-bull` → favour markup phase, growth tilt
+- `late-cycle-caution` / `recession-warning` → favour accumulation phase, strong balance sheet, low leverage
+- `panic-opportunity` → favour deeply-based accumulation names (the dip-buy case)
+First-pass: a small bonus/penalty lookup table. Tune later against calibration data (Phase 2).
+
+### Build
+
+- [ ] `gpt_investor/data/discovery.py`
+  - [ ] `_screen_universe(count) -> list[dict]` — wrap `yf.screen` for `most_actives` + `day_gainers` + `day_losers`; normalize `{symbol, name, pct, volume, price}`; tolerate dict-or-list shape; log + return `[]` on failure
+  - [ ] `_trending_endpoint(count) -> list[str]` — `requests.get` the trending REST URL (`query1.finance.yahoo.com/v1/finance/trending/US`) with `User-Agent` + timeout; parse `finance.result[0].quotes[].symbol`; `[]` on error
+  - [ ] `_is_equity_symbol(sym) -> bool` — extract the existing inline predicate, extend for `-USD`
+  - [ ] `_prefilter_by_dollar_volume(candidates, keep=60) -> list[dict]` — cheap liquidity gate before expensive scoring
+  - [ ] `_regime_fit(fund_tier, wyckoff_phase, regime_label) -> float` — the lookup-table bonus above; pure function, unit-testable
+  - [ ] `_setup_score(fund, wyckoff, regime_label) -> float` — composite rank; pure function
+  - [ ] `get_setup_candidates(num=MAX_TICKERS_TO_ANALYZE) -> dict[str, dict]` — orchestrates the funnel; returns ordered `{ticker: {status:"pending", fund, wyckoff, setup_score, why}}`. Parallelize the per-ticker scoring with threads. The `fund`/`wyckoff` dicts are passed straight into `_analyze_ticker` so the cards don't re-fetch.
+  - [ ] Cache: 15-min `TTLCache` (setups shift intraday but not every second). Reuse `_yf_lock`.
+  - [ ] **Delete** `get_trending_tickers` + `_TRENDING_SEARCH_TERMS`.
+- [ ] `gpt_investor/state.py`
+  - [ ] `_analyze_ticker` accepts pre-computed `fund` / `wyckoff` dicts (skip re-scoring on the discovery path; still fetch fresh price + news + sentiment + sonnet). Keep them optional so single-company / industry modes still compute inline.
+  - [ ] `fetch_analyses` `discovery_mode == "trending"` branch calls `get_setup_candidates` instead of `get_trending_tickers`. Rename the button label "Today's Trending" → **"Today's Setups"** (the mode is no longer about trendiness).
+  - [ ] Update imports.
+- [ ] Empty-result handling: 0 survivors (market closed, screens down, nothing passes the soft gate) → existing empty-`tickers_dict` early return; generalize the message to "No high-quality setups right now".
+- [ ] UI: card shows the **why** chip — `"Strong • accumulation • +regime"` — so the user sees *why the tool picked it*, not a % move.
+- [ ] Tests: `tests/test_discovery_setups.py`
+  - [ ] `_is_equity_symbol` rules (NVDA yes; BTC-USD / EURUSD=X / ^GSPC / BRK.B no)
+  - [ ] `_regime_fit` lookup determinism across (tier, phase, regime) combos
+  - [ ] `_setup_score` + ranking determinism on synthetic fund/wyckoff dicts (no yfinance hit)
+  - [ ] `_prefilter_by_dollar_volume` keeps the right top-N
+  - [ ] `network`-marked: `get_setup_candidates()` returns non-empty during market hours (smoke)
+
+### Acceptance
+
+- "Today's Setups" surfaces tickers the **tool** rates well (fund tier + Wyckoff phase + regime fit), NOT whatever Yahoo ranks as hot
+- Every card shows *why* it surfaced (the signal chip), not a % move
+- `day_losers` names that are in accumulation + strong fundamentals can surface (dip-buys); falling knives (markdown phase, weak fund) are filtered out
+- Scores computed in discovery are reused by the cards (no double yfinance fetch)
+- Market-closed / weekend / all-filtered-out degrades to a clean empty state — no hanging spinner
+- Crypto / FX / index never appear
+- Offline tests deterministic; one network smoke test
+
+### Decisions locked
+
+- **Yahoo screens = candidate universe only.** They list tickers; the tool's deterministic scores decide what surfaces. This is the whole point of the rewrite.
+- Include `day_losers` in the universe (the Wyckoff filter makes losers a *feature* — accumulation/dip-buy source — not noise).
+- Scoring is **deterministic, no LLM** — reuses `fundamentals.py` + `wyckoff.py` + `market_regime.py`. The verdict LLM still only runs per-surfaced-ticker, unchanged.
+- Pre-filter to ~60 by dollar-volume before full scoring — bounds the yfinance cost (the main downside vs the old funnel).
+- Reuse the discovery-computed scores on the cards (pass through `_analyze_ticker`) so we pay the fetch once.
+- **Depends on PW (Wyckoff).** Build order: `PW → PD'`.
+
+### Open questions
+
+- Composite weights `w_f` / `w_w` / regime bonus — hand-set at first; tune against calibration (Phase 2) once outcomes exist. (Don't optimise before data — see cross-cutting principles.)
+- Hard gate vs soft gate on `fund >= Solid AND wyckoff ∈ {accumulation, markup}`? Soft (rank penalty) first, so a great-fundamentals name in neutral phase can still surface. Revisit.
+- Universe size: is `most_actives + gainers + losers + trending` broad enough, or add a sector-rotation screen / 52-week-high screen later?
+- Cost ceiling: ~60 full scores per refresh × yfinance latency — measure wall-clock; if too slow, cache per-ticker fund/wyckoff scores across discovery runs (not just the candidate list).
 
 ---
 
@@ -224,7 +438,11 @@ After Phase 4 and 8+ weeks of calibration data.
 ## Build sequencing (single-line)
 
 ```
-P0 (regime indicators) → P1 (explainer agent) → P2 (verdict_history) → wait ~4 wks → P3 (audits) → P4 (data layers) → P5 (probabilistic + portfolio)
+P0 (regime indicators) → PW (Wyckoff layer) → PD' (signal-driven discovery) → P1 (explainer agent) → P2 (verdict_history) → wait ~4 wks → P3 (audits) → P4 (data layers) → P5 (probabilistic + portfolio)
 ```
+
+PW (Wyckoff — Stage [3] in the narrative pipeline above) ships **before** both PD' and P2: PD' needs the Wyckoff phase as a ranking input, and `verdict_history` needs to record `wyckoff_phase` + `wyckoff_score` from the first row or calibration can't measure the chart layer's lift. PW's full build spec lives in the "[3] Wyckoff" section above rather than as a separate numbered phase block.
+
+PD' (signal-driven discovery) **supersedes the old Phase D mover funnel** — same Yahoo data plumbing, but the ranking is flipped from "what moved most" to "what the tool scores as the best setup." It depends on PW, so it can no longer ship first; it slots after the Wyckoff layer exists.
 
 P0 + P1 + P2 can ship in one focused session (~7h). After that, the tool is data-accumulating and the next phase has actual ground truth to learn from.

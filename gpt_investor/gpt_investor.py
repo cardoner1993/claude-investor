@@ -12,6 +12,7 @@ setup_logging()
 
 from gpt_investor.ui.components import (
     analysis_dialog,
+    confirm_resolution_panel,
     hero,
     liquidity_panel,
     search_form,
@@ -29,6 +30,7 @@ def index() -> rx.Component:
         rx.vstack(
             hero(),
             search_form(),
+            confirm_resolution_panel(),
             rx.button(
                 "Test UI",
                 on_click=State.load_mock_data,

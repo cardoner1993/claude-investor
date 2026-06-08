@@ -17,9 +17,6 @@ _total_input_tokens: int = 0
 _total_output_tokens: int = 0
 _total_cache_read_tokens: int = 0
 
-_meta_lock = threading.Lock()
-_last_call_meta: dict = {}
-
 
 def add_token_usage(input_tokens: int, output_tokens: int, cache_read_tokens: int) -> None:
     global _total_input_tokens, _total_output_tokens, _total_cache_read_tokens
@@ -36,11 +33,6 @@ def get_token_totals() -> dict:
             "output": _total_output_tokens,
             "cache_read": _total_cache_read_tokens,
         }
-
-
-def get_last_call_meta() -> dict:
-    with _meta_lock:
-        return dict(_last_call_meta)
 
 
 def _parse_stream_json(stdout: str) -> dict:
@@ -96,7 +88,7 @@ def call_claude(
     require_tools: list[str] | None = None,
     max_retries: int = 1,
 ) -> str:
-    global _total_input_tokens, _total_output_tokens, _total_cache_read_tokens, _last_call_meta
+    global _total_input_tokens, _total_output_tokens, _total_cache_read_tokens
 
     base_cmd = [
         "claude", "-p", user_message,
@@ -163,16 +155,6 @@ def call_claude(
         tool_counts[tc["name"]] = tool_counts.get(tc["name"], 0) + 1
     called_set = set(tool_counts.keys())
     satisfied = (not require_tools) or bool(called_set.intersection(require_tools))
-
-    with _meta_lock:
-        _last_call_meta = {
-            "tool_calls": parsed["tool_calls"],
-            "urls": parsed["urls"],
-            "tool_counts": tool_counts,
-            "retried": attempt > 0,
-            "require_tools": require_tools,
-            "satisfied": satisfied,
-        }
 
     tool_summary = " ".join(f"{n}x{c}" for n, c in tool_counts.items()) or "none"
     text = parsed["text"]
