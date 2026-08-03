@@ -11,7 +11,13 @@ dialog is free and a prompt-version bump recomputes.
 from loguru import logger
 
 from gpt_investor.llm.claude import call_claude
-from gpt_investor.llm.schemas import PROMPT_VERSION  # noqa: F401  (re-exported for callers)
+from gpt_investor.llm.schemas import PROMPT_VERSION
+
+# The explainer caches under its OWN version so editing _SYSTEM_PROMPT below
+# busts stale prose, independently of the verdict's PROMPT_VERSION. Bump the
+# `-expN` suffix whenever _SYSTEM_PROMPT changes; the verdict version is folded
+# in so a verdict-contract change also invalidates the explanation of it.
+EXPLAINER_VERSION = f"{PROMPT_VERSION}-exp1"
 
 _SYSTEM_PROMPT = (
     "You explain an investment verdict to a smart non-expert. You are given the "

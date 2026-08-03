@@ -18,7 +18,7 @@ from gpt_investor.llm.analysis import (
     get_final_analysis,
     get_liquidity_context,
 )
-from gpt_investor.llm.explainer import explain_verdict, PROMPT_VERSION
+from gpt_investor.llm.explainer import explain_verdict, EXPLAINER_VERSION
 from gpt_investor.data.market_data import (
     get_current_price,
     get_company_name,
@@ -402,13 +402,13 @@ class State(rx.State):
             macro = self.liquidity_context
             verdict = self.analyses.get(ticker, "")
 
-        cached = await asyncio.to_thread(get_cached_explainer, ticker, PROMPT_VERSION)
+        cached = await asyncio.to_thread(get_cached_explainer, ticker, EXPLAINER_VERSION)
         if cached:
             text = cached
         else:
             text = await asyncio.to_thread(explain_verdict, fund, sent, wyck, macro, verdict)
             if text:
-                await asyncio.to_thread(save_cached_explainer, ticker, PROMPT_VERSION, text)
+                await asyncio.to_thread(save_cached_explainer, ticker, EXPLAINER_VERSION, text)
 
         html = md_lib.markdown(text, extensions=["nl2br", "sane_lists"]) if text else ""
         async with self:
