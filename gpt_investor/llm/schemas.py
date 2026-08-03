@@ -82,6 +82,18 @@ class VerdictLLM(BaseModel):
     )
 
 
+class AuditLLM(BaseModel):
+    """A specialist audit agent's advisory take on a verdict, informed by
+    similar past cases and their realised outcomes."""
+
+    label: Literal["agree", "caution", "disagree"]
+    note: str = Field(
+        min_length=4,
+        max_length=400,
+        description="One-two sentence critique referencing the past-case win/loss pattern",
+    )
+
+
 def render_verdict_markdown(v: VerdictLLM, current_price: float) -> str:
     """Render a `VerdictLLM` into the markdown shape callers + cache already expect."""
     pt = f"${v.price_target:.2f}" if v.price_target is not None else "n/a"

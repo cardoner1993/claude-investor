@@ -37,6 +37,17 @@ from gpt_investor.data.discovery import (
     resolve_ticker,
 )
 from gpt_investor.llm.claude import get_token_totals
+from gpt_investor.llm.audit import (
+    get_similar_past,
+    audit_financial,
+    audit_sentiment,
+    combine_audits,
+    enough_history,
+    log_gate,
+)
+
+# audit label -> Radix color_scheme for the advisory chip
+_AUDIT_COLORS = {"agree": "green", "caution": "amber", "disagree": "red"}
 
 # tier -> Radix color_scheme used for the fundamental-score badge on each card.
 _TIER_COLORS = {
@@ -222,6 +233,26 @@ async def _analyze_ticker(
             regime, wyck, final_analysis, spy_price,
         )
 
+        # Audit agents (advisory) — two specialists critique the verdict against
+        # balanced similar past outcomes. Gated: needs >=5 similar cases with
+        # realised returns, so this stays dark until verdict_history fills in.
+        if final_analysis:
+            sector = scored.get("raw", {}).get("sector")
+            regime_label = regime.get("label") if regime else None
+            cases = await asyncio.to_thread(get_similar_past, sector, scored["tier"], regime_label)
+            log_gate(ticker, len(cases))
+            if enough_history(cases):
+                fin_audit, sent_audit = await asyncio.gather(
+                    asyncio.to_thread(audit_financial, final_analysis, fund_block, cases),
+                    asyncio.to_thread(audit_sentiment, final_analysis, sent_block, cases),
+                )
+                combined = combine_audits(fin_audit, sent_audit)
+                async with state:
+                    state.audit_label[ticker] = combined["label"]
+                    state.audit_color[ticker] = _AUDIT_COLORS.get(combined["label"], "gray")
+                    state.audit_block[ticker] = combined["text"]
+                _log(ticker, f"audit={combined['label']}")
+
         totals = get_token_totals()
         async with state:
             state.names[ticker] = name
@@ -265,6 +296,9 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    audit_label: dict[str, str] = {}    # ticker -> "agree"/"caution"/"disagree" (advisory)
+    audit_color: dict[str, str] = {}    # ticker -> Radix color for the audit chip
+    audit_block: dict[str, str] = {}    # ticker -> audit markdown for the dialog
     liquidity_context: str = ""
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
@@ -293,6 +327,9 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_audit_html: str = ""
+    selected_audit_label: str = ""
+    selected_audit_color: str = ""
 
     @rx.var
     def all_done(self) -> bool:
@@ -351,6 +388,9 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.audit_label = {}
+        self.audit_color = {}
+        self.audit_block = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -414,6 +454,12 @@ class State(rx.State):
         )
         self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
+        audit_block = self.audit_block.get(ticker, "")
+        self.selected_audit_html = (
+            md_lib.markdown(audit_block, extensions=["nl2br", "sane_lists"]) if audit_block else ""
+        )
+        self.selected_audit_label = self.audit_label.get(ticker, "")
+        self.selected_audit_color = self.audit_color.get(ticker, "")
 
     def close_ticker(self):
         self.selected_ticker = ""
@@ -429,6 +475,9 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_audit_html = ""
+        self.selected_audit_label = ""
+        self.selected_audit_color = ""
 
     def handle_submit(self, data: dict):
         industry = data.get("industry", "").strip()
