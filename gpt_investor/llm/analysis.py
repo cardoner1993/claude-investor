@@ -160,7 +160,11 @@ def get_final_analysis(
         "Thesis must reference the fundamental tier explicitly. "
         "For every `*_addressed` field, write ONE sentence on how that input "
         "informed the verdict, or the literal phrase `no impact` if it did not. "
-        "Never leave an `_addressed` field empty — every input must be acknowledged."
+        "Never leave an `_addressed` field empty — every input must be acknowledged. "
+        "Also give a probability distribution over the 6-month outcome: prob_up "
+        "(>+2%), prob_flat (±2%), prob_down (<-2%); they should sum to ~1. "
+        "Finally write a `premortem`: assume this verdict is wrong 6 months out — "
+        "state the single most likely reason why."
     )
 
     user_message = (

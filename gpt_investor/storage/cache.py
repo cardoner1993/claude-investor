@@ -65,6 +65,9 @@ def _conn() -> sqlite3.Connection:
             verdict         TEXT,
             confidence      TEXT,
             price_target    REAL,
+            prob_up         REAL,
+            prob_flat       REAL,
+            prob_down       REAL,
             sonnet_text     TEXT,
             spy_at_capture  REAL,
             price_7d        REAL,
@@ -82,6 +85,11 @@ def _conn() -> sqlite3.Connection:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(analyses)").fetchall()}
     if "sentiment_json" not in cols:
         conn.execute("ALTER TABLE analyses ADD COLUMN sentiment_json TEXT")
+    # Idempotent migration: prob columns added in P5 to a pre-existing verdict_history.
+    vcols = {row[1] for row in conn.execute("PRAGMA table_info(verdict_history)").fetchall()}
+    for pc in ("prob_up", "prob_flat", "prob_down"):
+        if pc not in vcols:
+            conn.execute(f"ALTER TABLE verdict_history ADD COLUMN {pc} REAL")
     conn.commit()
     return conn
 
@@ -201,7 +209,7 @@ _VERDICT_INPUT_COLS = (
     "price", "fund_score", "fund_tier", "sentiment_score", "sentiment_conf",
     "analyst_grade", "analyst_score", "regime_label", "wyckoff_phase",
     "wyckoff_score", "sector", "industry", "verdict", "confidence",
-    "price_target", "sonnet_text", "spy_at_capture",
+    "price_target", "prob_up", "prob_flat", "prob_down", "sonnet_text", "spy_at_capture",
 )
 _VERDICT_OUTCOME_COLS = (
     "price_7d", "price_30d", "price_90d", "price_365d",

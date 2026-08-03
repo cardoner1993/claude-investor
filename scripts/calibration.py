@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gpt_investor.storage.cache import all_verdicts
 from gpt_investor.llm.verdict import PROMPT_VERSION
+from gpt_investor.llm.probability import brier_score, log_loss, realized_class
 
 _GROUP_FIELDS = ["fund_tier", "verdict", "sentiment_conf", "regime_label", "wyckoff_phase"]
 
@@ -82,6 +83,26 @@ def main() -> None:
     n, mean_ret, hit, alpha = _agg(rows)
     alpha_s = f"{alpha:+.2%}" if alpha is not None else "n/a"
     print(f"\noverall: N={n}  mean ret={mean_ret:+.2%}  hit rate={hit:.0%}  alpha={alpha_s}")
+
+    # Probabilistic calibration (P5): score the model's up/flat/down distribution
+    # against the realised class. Only rows that carry probabilities count.
+    briers, losses = [], []
+    for r in rows:
+        cls = realized_class(r["_ret"])
+        probs = {"up": r.get("prob_up"), "flat": r.get("prob_flat"), "down": r.get("prob_down")}
+        if cls is None or all(probs[k] is None for k in probs):
+            continue
+        b, ll = brier_score(probs, cls), log_loss(probs, cls)
+        if b is not None:
+            briers.append(b)
+        if ll is not None:
+            losses.append(ll)
+    if briers:
+        print(f"probabilistic: N={len(briers)}  mean Brier={sum(briers)/len(briers):.4f}  "
+              f"mean log-loss={sum(losses)/len(losses):.4f}")
+    else:
+        print("probabilistic: no rows with probabilities + outcomes yet")
+
     for field in _GROUP_FIELDS:
         _print_group(field, rows)
 
