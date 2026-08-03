@@ -26,7 +26,7 @@ from gpt_investor.data.discovery import resolve_ticker_verbose as _resolve_verbo
 from gpt_investor.data.discovery import (
     MAX_TICKERS_TO_ANALYZE,
     generate_ticker_ideas,
-    get_trending_tickers,
+    get_setup_candidates,
     get_trending_industries,
     resolve_ticker,
 )
@@ -64,8 +64,15 @@ async def _analyze_ticker(
     industry_task: "asyncio.Task[str] | None",
     liquidity_context: str = "",
     regime: dict | None = None,
+    precomputed: dict | None = None,
 ):
     """`industry_task` is a Task whose result is the industry analysis string.
+
+    `precomputed` is the setup-discovery entry `{fund, wyckoff, why}` when the
+    ticker came from `get_setup_candidates` — the fundamentals + Wyckoff scores
+    were already computed there, so the live path reuses them instead of
+    re-fetching, and the "why" chip is published to the card.
+
     Cached-path tickers don't need it (skipped). Live-path tickers await it
     just before the sonnet call so it runs in parallel with sentiment/news/etc.
     None means caller pre-determined no tickers needed it (all cached).
@@ -103,6 +110,8 @@ async def _analyze_ticker(
                 state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
                 state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
                 state.wyck_block[ticker] = format_wyckoff(wyck)
+                if precomputed:
+                    state.setup_why[ticker] = precomputed["why"]
                 if sentiment_dict:
                     state.sent_summary[ticker] = chip_label(sentiment_dict["score"], sentiment_dict["confidence"])
                     state.sent_color[ticker] = chip_color(sentiment_dict["score"], sentiment_dict["confidence"])
@@ -121,17 +130,29 @@ async def _analyze_ticker(
         news = await asyncio.to_thread(get_news, ticker)
         _log(ticker, f"got {len(news)} articles", time.time() - t)
 
-        _log(ticker, "running sentiment + ratings + price + fundamentals (parallel)")
-        t = time.time()
-        sentiment, analyst_ratings, price, name, fund_raw, wyck = await asyncio.gather(
-            asyncio.to_thread(get_sentiment_analysis, ticker, news),
-            asyncio.to_thread(get_analyst_ratings, ticker),
-            asyncio.to_thread(get_current_price, ticker),
-            asyncio.to_thread(get_company_name, ticker),
-            asyncio.to_thread(fetch_fundamentals, ticker),
-            asyncio.to_thread(score_wyckoff_ticker, ticker),
-        )
-        scored = score_fundamentals(fund_raw)
+        if precomputed:
+            _log(ticker, "running sentiment + ratings + price (parallel; fund/wyckoff reused)")
+            t = time.time()
+            sentiment, analyst_ratings, price, name = await asyncio.gather(
+                asyncio.to_thread(get_sentiment_analysis, ticker, news),
+                asyncio.to_thread(get_analyst_ratings, ticker),
+                asyncio.to_thread(get_current_price, ticker),
+                asyncio.to_thread(get_company_name, ticker),
+            )
+            scored = precomputed["fund"]
+            wyck = precomputed["wyckoff"]
+        else:
+            _log(ticker, "running sentiment + ratings + price + fundamentals (parallel)")
+            t = time.time()
+            sentiment, analyst_ratings, price, name, fund_raw, wyck = await asyncio.gather(
+                asyncio.to_thread(get_sentiment_analysis, ticker, news),
+                asyncio.to_thread(get_analyst_ratings, ticker),
+                asyncio.to_thread(get_current_price, ticker),
+                asyncio.to_thread(get_company_name, ticker),
+                asyncio.to_thread(fetch_fundamentals, ticker),
+                asyncio.to_thread(score_wyckoff_ticker, ticker),
+            )
+            scored = score_fundamentals(fund_raw)
         fund_block = format_fundamentals(scored)
         sent_block = format_sentiment_for_llm(sentiment)
         wyck_block = format_wyckoff(wyck)
@@ -153,6 +174,8 @@ async def _analyze_ticker(
             state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
             state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
             state.wyck_block[ticker] = wyck_block
+            if precomputed:
+                state.setup_why[ticker] = precomputed["why"]
 
         if state.cancel_requested:
             _log(ticker, "cancelled before sonnet")
@@ -224,6 +247,7 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    setup_why: dict[str, str] = {}      # ticker -> "Solid • accumulation • +regime" (setup discovery only)
     liquidity_context: str = ""
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
@@ -252,6 +276,7 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_setup_why: str = ""
 
     @rx.var
     def all_done(self) -> bool:
@@ -310,6 +335,7 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.setup_why = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -325,7 +351,7 @@ class State(rx.State):
         return State.fetch_analyses
 
     def trending_pick(self):
-        self.industry = "Today's Trending"
+        self.industry = "Today's Setups"
         self.industry_input = ""
         self.discovery_mode = "trending"
         self.direct_yf_key = ""
@@ -373,6 +399,7 @@ class State(rx.State):
         )
         self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
+        self.selected_setup_why = self.setup_why.get(ticker, "")
 
     def close_ticker(self):
         self.selected_ticker = ""
@@ -388,6 +415,7 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_setup_why = ""
 
     def handle_submit(self, data: dict):
         industry = data.get("industry", "").strip()
@@ -502,7 +530,7 @@ class State(rx.State):
             disk_liq = await asyncio.to_thread(get_cached_liquidity)
 
         if self.discovery_mode == "trending":
-            discover = asyncio.to_thread(get_trending_tickers)
+            discover = asyncio.to_thread(get_setup_candidates)
         elif self.discovery_mode == "single":
             discover = asyncio.to_thread(_resolve_single, self.company_query)
         else:
@@ -529,6 +557,15 @@ class State(rx.State):
                 liquidity_context = self.liquidity_context
                 liquidity_html = self.liquidity_html
         need_liquidity = need_fetch  # preserved name for downstream state update
+
+        # Setup discovery returns a rich {ticker: {status, fund, wyckoff, ...}}
+        # dict; split it into the plain {ticker: status} state map plus a
+        # per-ticker precomputed-score map the pipeline reuses (no re-fetch).
+        setups: dict[str, dict] = {}
+        if self.discovery_mode == "trending" and tickers_dict:
+            setups = tickers_dict
+            tickers_dict = {t: "pending" for t in setups}
+
         logger.info("run tickers: {}  ({:.1f}s)", list(tickers_dict.keys()), time.time() - t)
         logger.info("run liquidity: {}", liquidity_source)
 
@@ -600,7 +637,7 @@ class State(rx.State):
 
         t = time.time()
         await asyncio.gather(*[
-            _analyze_ticker(self, ticker, industry_task, liquidity_context, regime)
+            _analyze_ticker(self, ticker, industry_task, liquidity_context, regime, setups.get(ticker))
             for ticker in tickers_dict
         ])
         logger.info("run all tickers done  ({:.1f}s)", time.time() - t)
