@@ -93,7 +93,10 @@ async def _analyze_ticker(
             )
             scored = score_fundamentals(fund_raw)
             fund_block = format_fundamentals(scored)
-            signals = await asyncio.to_thread(fetch_signals, ticker, scored)
+            # Cached path stays cheap: fetch signals for the earnings banner but
+            # skip the peer-median fan-out (up to 8 extra .info calls) by passing
+            # fundamentals=None — peers move slowly and the live run has them.
+            signals = await asyncio.to_thread(fetch_signals, ticker, None)
             sentiment_dict = cached.get("sentiment_dict")
             final_analysis = cached["final_analysis"]
             async with state:

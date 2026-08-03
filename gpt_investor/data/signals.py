@@ -255,20 +255,26 @@ def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
     try:
         fin = t.financials
         if fin is not None and not fin.empty:
-            years = fin.shape[1] - 1  # columns are periods, newest first
+            # Span the CAGR over the clean points actually used, not the raw
+            # column count — dropped NaN cells would otherwise annualize over
+            # too many years and understate growth.
             rev = _row(fin, "Total Revenue")
-            if rev and years > 0:
-                rev_cagr = cagr(rev[-1], rev[0], years)
-            op_income = _row(fin, "Operating Income")
-            if rev and op_income:
-                margins = [oi / rv for oi, rv in zip(reversed(op_income), reversed(rev)) if rv]
-                op_margin_slope = margin_slope(margins)
+            if rev and len(rev) >= 2:
+                rev_cagr = cagr(rev[-1], rev[0], len(rev) - 1)
+            # Margins: pair Operating Income and Revenue by COLUMN before
+            # dropping NaN, so a NaN in one row can't shift the other's years.
+            oi_raw = _raw_row(fin, "Operating Income")
+            rev_raw = _raw_row(fin, "Total Revenue")
+            if oi_raw and rev_raw:
+                pairs = [(oi, rv) for oi, rv in zip(oi_raw, rev_raw) if oi is not None and rv]
+                if len(pairs) >= 2:
+                    margins = [oi / rv for oi, rv in reversed(pairs)]  # oldest→newest
+                    op_margin_slope = margin_slope(margins)
         cf = t.cashflow
         if cf is not None and not cf.empty:
             fcf = _row(cf, "Free Cash Flow")
-            yrs = cf.shape[1] - 1
-            if fcf and yrs > 0:
-                fcf_cagr = cagr(fcf[-1], fcf[0], yrs)
+            if fcf and len(fcf) >= 2:
+                fcf_cagr = cagr(fcf[-1], fcf[0], len(fcf) - 1)
     except Exception as e:
         logger.bind(ticker=ticker).debug("signals trend failed: {}", e)
 
@@ -302,12 +308,21 @@ def _as_date(x) -> date | None:
 
 
 def _row(df, label: str) -> list[float] | None:
-    """Row of a yfinance statement DataFrame as newest→oldest floats, or None."""
+    """Row of a yfinance statement DataFrame as newest→oldest floats with NaN
+    dropped, or None. Use for standalone series (CAGR endpoints)."""
+    raw = _raw_row(df, label)
+    if raw is None:
+        return None
+    return [v for v in raw if v is not None] or None
+
+
+def _raw_row(df, label: str) -> list | None:
+    """Row as newest→oldest with NaN kept as None (positions preserved). Use
+    when two rows must stay column-aligned before dropping missing cells."""
     try:
         if label not in df.index:
             return None
-        vals = [_safe_float(v) for v in df.loc[label].tolist()]
-        return [v for v in vals if v is not None] or None
+        return [_safe_float(v) for v in df.loc[label].tolist()]
     except Exception:
         return None
 

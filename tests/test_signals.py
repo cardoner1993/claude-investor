@@ -61,6 +61,24 @@ def test_peer_relative():
     assert s.peer_relative(10, [])["median"] is None
 
 
+def test_row_helpers_handle_nan_alignment():
+    import pandas as pd
+
+    # newest-first columns; Operating Income has a NaN in the middle period
+    df = pd.DataFrame(
+        {"2025": [100.0, 20.0], "2024": [90.0, float("nan")], "2023": [80.0, 16.0]},
+        index=["Total Revenue", "Operating Income"],
+    )
+    assert s._row(df, "Total Revenue") == [100.0, 90.0, 80.0]
+    assert s._row(df, "Operating Income") == [20.0, 16.0]        # NaN dropped
+    assert s._raw_row(df, "Operating Income") == [20.0, None, 16.0]  # NaN kept as None
+    assert s._row(df, "Missing Line") is None
+    # column-aligned pairing skips only the NaN period, not a shifted year
+    oi_raw, rev_raw = s._raw_row(df, "Operating Income"), s._raw_row(df, "Total Revenue")
+    pairs = [(oi, rv) for oi, rv in zip(oi_raw, rev_raw) if oi is not None and rv]
+    assert pairs == [(20.0, 100.0), (16.0, 80.0)]
+
+
 def test_format_signals_smoke():
     sig = {
         "short": {"short_pct": 0.18, "crowded": True},
