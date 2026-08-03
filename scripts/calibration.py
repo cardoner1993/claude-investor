@@ -64,7 +64,10 @@ def _print_group(field: str, rows: list[dict]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--horizon", type=int, default=30, choices=[7, 30, 90, 365])
+    ap.add_argument("--horizon", type=int, default=30, choices=[7, 30, 90, 365],
+                    help="return horizon for the yes/no calibration groups")
+    ap.add_argument("--prob-horizon", type=int, default=90, choices=[7, 30, 90, 365],
+                    help="return horizon the probability distribution is scored against (matches the ~quarter prompt)")
     ap.add_argument("--prompt-version", default=PROMPT_VERSION,
                     help="filter to one prompt contract, or 'all'")
     args = ap.parse_args()
@@ -84,10 +87,13 @@ def main() -> None:
     alpha_s = f"{alpha:+.2%}" if alpha is not None else "n/a"
     print(f"\noverall: N={n}  mean ret={mean_ret:+.2%}  hit rate={hit:.0%}  alpha={alpha_s}")
 
-    # Probabilistic calibration (P5): score the model's up/flat/down distribution
-    # against the realised class. Only rows that carry probabilities count.
+    # Probabilistic calibration (P5): the model's up/flat/down distribution is
+    # over the ~quarter horizon, so score it against the prob-horizon return
+    # (default 90d), independent of the yes/no `--horizon` above — otherwise a
+    # 90-day distribution gets graded on 30-day moves.
+    prob_rows = _rows_with_return(verdicts, args.prob_horizon)
     briers, losses = [], []
-    for r in rows:
+    for r in prob_rows:
         cls = realized_class(r["_ret"])
         probs = {"up": r.get("prob_up"), "flat": r.get("prob_flat"), "down": r.get("prob_down")}
         if cls is None or all(probs[k] is None for k in probs):
@@ -98,10 +104,10 @@ def main() -> None:
         if ll is not None:
             losses.append(ll)
     if briers:
-        print(f"probabilistic: N={len(briers)}  mean Brier={sum(briers)/len(briers):.4f}  "
-              f"mean log-loss={sum(losses)/len(losses):.4f}")
+        print(f"probabilistic ({args.prob_horizon}d): N={len(briers)}  "
+              f"mean Brier={sum(briers)/len(briers):.4f}  mean log-loss={sum(losses)/len(losses):.4f}")
     else:
-        print("probabilistic: no rows with probabilities + outcomes yet")
+        print(f"probabilistic ({args.prob_horizon}d): no rows with probabilities + outcomes yet")
 
     for field in _GROUP_FIELDS:
         _print_group(field, rows)
