@@ -21,6 +21,7 @@ from gpt_investor.data.market_data import (
 from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals, format_fundamentals
 from gpt_investor.data.market_regime import get_market_regime
 from gpt_investor.data.wyckoff import score_ticker as score_wyckoff_ticker, format_wyckoff
+from gpt_investor.data.signals import fetch_signals, format_signals
 from gpt_investor.data.sentiment import chip_label, chip_color, format_for_llm as format_sentiment_for_llm
 from gpt_investor.data.discovery import resolve_ticker_verbose as _resolve_verbose_fn
 from gpt_investor.data.discovery import (
@@ -92,6 +93,7 @@ async def _analyze_ticker(
             )
             scored = score_fundamentals(fund_raw)
             fund_block = format_fundamentals(scored)
+            signals = await asyncio.to_thread(fetch_signals, ticker, scored)
             sentiment_dict = cached.get("sentiment_dict")
             final_analysis = cached["final_analysis"]
             async with state:
@@ -103,6 +105,8 @@ async def _analyze_ticker(
                 state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
                 state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
                 state.wyck_block[ticker] = format_wyckoff(wyck)
+                state.signals_block[ticker] = format_signals(signals)
+                state.earnings_banner[ticker] = signals.get("earnings_banner", "")
                 if sentiment_dict:
                     state.sent_summary[ticker] = chip_label(sentiment_dict["score"], sentiment_dict["confidence"])
                     state.sent_color[ticker] = chip_color(sentiment_dict["score"], sentiment_dict["confidence"])
@@ -135,6 +139,8 @@ async def _analyze_ticker(
         fund_block = format_fundamentals(scored)
         sent_block = format_sentiment_for_llm(sentiment)
         wyck_block = format_wyckoff(wyck)
+        signals = await asyncio.to_thread(fetch_signals, ticker, scored)
+        signals_block = format_signals(signals)
         _log(
             ticker,
             f"all parallel done  price={price:.2f}  fund={scored['tier']} {scored['score']}  "
@@ -153,6 +159,8 @@ async def _analyze_ticker(
             state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
             state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
             state.wyck_block[ticker] = wyck_block
+            state.signals_block[ticker] = signals_block
+            state.earnings_banner[ticker] = signals.get("earnings_banner", "")
 
         if state.cancel_requested:
             _log(ticker, "cancelled before sonnet")
@@ -175,7 +183,7 @@ async def _analyze_ticker(
         final_analysis = await asyncio.to_thread(
             get_final_analysis,
             ticker, price, sentiment, analyst_ratings,
-            industry_analysis, liquidity_context, scored, regime, wyck,
+            industry_analysis, liquidity_context, scored, regime, wyck, signals,
         )
         _log(ticker, "final analysis done", time.time() - t)
 
@@ -224,6 +232,8 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    signals_block: dict[str, str] = {}  # ticker -> higher-signal markdown block (P4)
+    earnings_banner: dict[str, str] = {}  # ticker -> "EARNINGS IN 3D" (empty if >7d out)
     liquidity_context: str = ""
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
@@ -252,6 +262,8 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_signals_html: str = ""
+    selected_earnings_banner: str = ""
 
     @rx.var
     def all_done(self) -> bool:
@@ -310,6 +322,8 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.signals_block = {}
+        self.earnings_banner = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -373,6 +387,11 @@ class State(rx.State):
         )
         self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
+        signals_block = self.signals_block.get(ticker, "")
+        self.selected_signals_html = (
+            md_lib.markdown(signals_block, extensions=["nl2br", "sane_lists"]) if signals_block else ""
+        )
+        self.selected_earnings_banner = self.earnings_banner.get(ticker, "")
 
     def close_ticker(self):
         self.selected_ticker = ""
@@ -388,6 +407,8 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_signals_html = ""
+        self.selected_earnings_banner = ""
 
     def handle_submit(self, data: dict):
         industry = data.get("industry", "").strip()

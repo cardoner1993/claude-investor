@@ -7,6 +7,7 @@ from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamental
 from gpt_investor.data.macro import get_liquidity_snapshot, format_liquidity, snapshot_is_complete
 from gpt_investor.data.market_regime import format_regime
 from gpt_investor.data.wyckoff import format_wyckoff
+from gpt_investor.data.signals import format_signals
 from gpt_investor.data.market_data import _fetch_article_text
 from gpt_investor.llm.schemas import SentimentLLM, VerdictLLM, render_verdict_markdown
 from gpt_investor.data.sentiment import (
@@ -119,6 +120,7 @@ def get_final_analysis(
     fundamentals: dict | None = None,
     regime: dict | None = None,
     wyckoff: dict | None = None,
+    signals: dict | None = None,
 ):
     """Run final Buy/Hold/Sell verdict.
 
@@ -149,6 +151,7 @@ def get_final_analysis(
 
     regime_block = format_regime(regime) if regime else ""
     wyckoff_block = format_wyckoff(wyckoff) if wyckoff else ""
+    signals_block = format_signals(signals) if signals else ""
 
     system_prompt = (
         "You are a concise, opinionated financial analyst. "
@@ -170,6 +173,7 @@ def get_final_analysis(
         f"Analyst ratings:\n{analyst_ratings}\n\n"
         f"Industry context:\n{industry_analysis}\n\n"
         + (f"Technical / Wyckoff timing:\n{wyckoff_block}\n\n" if wyckoff_block else "")
+        + (f"{signals_block}\n\n" if signals_block else "")
         + (f"Macro liquidity context:\n{liquidity_context}\n\n" if liquidity_context else "")
         + (f"Market regime:\n{regime_block}\n\n" if regime_block else "")
         + "Give your investment recommendation as the structured verdict."
