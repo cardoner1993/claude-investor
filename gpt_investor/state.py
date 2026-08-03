@@ -105,6 +105,35 @@ def _record_verdict_row(ticker, price, scored, sentiment, analyst_ratings,
     })
 
 
+async def _run_audits(state, ticker, scored, regime, final_analysis, fund_block, sent_block):
+    """Advisory audit pass. Isolated from the verdict lifecycle: the caller runs
+    this only after the verdict is published + persisted, inside its own
+    try/except, so nothing here can error or hide a finished verdict."""
+    sector = scored.get("raw", {}).get("sector")
+    regime_label = regime.get("label") if regime else None
+    cases = await asyncio.to_thread(get_similar_past, sector, scored["tier"], regime_label)
+    log_gate(ticker, len(cases))
+    if not enough_history(cases):
+        return
+    fin_audit, sent_audit = await asyncio.gather(
+        asyncio.to_thread(audit_financial, final_analysis, fund_block, cases),
+        asyncio.to_thread(audit_sentiment, final_analysis, sent_block, cases),
+    )
+    combined = combine_audits(fin_audit, sent_audit)
+    color = _AUDIT_COLORS.get(combined["label"], "gray")
+    html = md_lib.markdown(combined["text"], extensions=["nl2br", "sane_lists"])
+    async with state:
+        state.audit_label[ticker] = combined["label"]
+        state.audit_color[ticker] = color
+        state.audit_block[ticker] = combined["text"]
+        # If the dialog is already open on this ticker, refresh it live.
+        if state.selected_ticker == ticker:
+            state.selected_audit_label = combined["label"]
+            state.selected_audit_color = color
+            state.selected_audit_html = html
+    _log(ticker, f"audit={combined['label']}")
+
+
 async def _analyze_ticker(
     state,
     ticker: str,
@@ -233,26 +262,6 @@ async def _analyze_ticker(
             regime, wyck, final_analysis, spy_price,
         )
 
-        # Audit agents (advisory) — two specialists critique the verdict against
-        # balanced similar past outcomes. Gated: needs >=5 similar cases with
-        # realised returns, so this stays dark until verdict_history fills in.
-        if final_analysis:
-            sector = scored.get("raw", {}).get("sector")
-            regime_label = regime.get("label") if regime else None
-            cases = await asyncio.to_thread(get_similar_past, sector, scored["tier"], regime_label)
-            log_gate(ticker, len(cases))
-            if enough_history(cases):
-                fin_audit, sent_audit = await asyncio.gather(
-                    asyncio.to_thread(audit_financial, final_analysis, fund_block, cases),
-                    asyncio.to_thread(audit_sentiment, final_analysis, sent_block, cases),
-                )
-                combined = combine_audits(fin_audit, sent_audit)
-                async with state:
-                    state.audit_label[ticker] = combined["label"]
-                    state.audit_color[ticker] = _AUDIT_COLORS.get(combined["label"], "gray")
-                    state.audit_block[ticker] = combined["text"]
-                _log(ticker, f"audit={combined['label']}")
-
         totals = get_token_totals()
         async with state:
             state.names[ticker] = name
@@ -266,6 +275,17 @@ async def _analyze_ticker(
                 state.selected_analysis_html = md_lib.markdown(
                     final_analysis, extensions=["nl2br", "sane_lists"]
                 )
+
+        # Audit agents (advisory) — run AFTER the verdict is published + persisted,
+        # in their own try/except, so an audit failure (CLI hang, network) can
+        # never flip a finished verdict to "error" or hide it. Gated: needs >=5
+        # balanced similar past cases with realised returns, so this stays dark
+        # until verdict_history fills in.
+        if final_analysis:
+            try:
+                await _run_audits(state, ticker, scored, regime, final_analysis, fund_block, sent_block)
+            except Exception as e:
+                _log(ticker, f"audit failed (ignored): {e}")
 
         _log(ticker, "DONE", time.time() - ticker_start)
     except Exception as e:

@@ -29,10 +29,26 @@ def _ret(price, fwd) -> float | None:
     return (fwd - price) / price
 
 
-def get_similar_past(sector, fund_tier, regime_label, horizon: int = 30, limit: int = 6) -> list[dict]:
+def _match_score(v: dict, sector, fund_tier, regime_label) -> int:
+    """Count aligned attributes (sector / tier / regime). A None on either side
+    never counts — an unknown sector must not match every NULL-sector row, and
+    regime alone (market-wide, identical all run) must not qualify a case."""
+    score = 0
+    if sector and v.get("sector") == sector:
+        score += 1
+    if fund_tier and v.get("fund_tier") == fund_tier:
+        score += 1
+    if regime_label and v.get("regime_label") == regime_label:
+        score += 1
+    return score
+
+
+def get_similar_past(sector, fund_tier, regime_label, horizon: int = 30, limit: int = 6,
+                     min_match: int = 2) -> list[dict]:
     """Balanced win/loss sample of past verdicts similar to this one.
 
-    Similarity = shares sector OR fund_tier OR regime_label. Only rows with a
+    Similarity requires at least `min_match` of {sector, fund_tier, regime_label}
+    to align (regime-only or None-only matches don't qualify). Only rows with a
     realised `price_{horizon}d` outcome count. Returns up to `limit` cases,
     balanced between wins and losses so an agent can't just pattern-match "it
     always goes up".
@@ -44,8 +60,7 @@ def get_similar_past(sector, fund_tier, regime_label, horizon: int = 30, limit: 
         r = _ret(v.get("price"), v.get(price_col))
         if r is None:
             continue
-        if not (v.get("sector") == sector or v.get("fund_tier") == fund_tier
-                or v.get("regime_label") == regime_label):
+        if _match_score(v, sector, fund_tier, regime_label) < min_match:
             continue
         case = {
             "ticker": v.get("ticker"),
@@ -123,4 +138,6 @@ def enough_history(cases: list[dict]) -> bool:
 
 
 def log_gate(ticker: str, n: int) -> None:
-    logger.bind(ticker=ticker).info("audit gate: {} similar past cases (need {})", n, _MIN_SIMILAR)
+    logger.bind(ticker=ticker).info(
+        "audit gate: {} balanced similar cases w/ outcomes (need {})", n, _MIN_SIMILAR
+    )
