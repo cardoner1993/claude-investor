@@ -3,16 +3,24 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 from loguru import logger
 
+from gpt_investor.infra.resilience import resilient
+
 
 def get_company_name(ticker: str) -> str:
     info = yf.Ticker(ticker).info
     return info.get("shortName") or info.get("longName") or ticker
 
 
-def get_current_price(ticker):
+def _get_current_price_raw(ticker):
     stock = yf.Ticker(ticker)
     data = stock.history(period="1d", interval="1m")
     return data["Close"].iloc[-1]
+
+
+def get_current_price(ticker):
+    # Price is a critical leg — retry, then serve last-good on total failure
+    # so a transient Yahoo hiccup doesn't blank the whole card.
+    return resilient("price", _get_current_price_raw, ticker, key=ticker)
 
 
 def get_news(ticker: str) -> list:

@@ -31,6 +31,7 @@ from gpt_investor.data.discovery import (
     resolve_ticker,
 )
 from gpt_investor.llm.claude import get_token_totals
+from gpt_investor.infra.resilience import reset_health, degraded_legs
 
 # tier -> Radix color_scheme used for the fundamental-score badge on each card.
 _TIER_COLORS = {
@@ -486,6 +487,7 @@ class State(rx.State):
         async with self:
             self.error_message = ""
         run_start = time.time()
+        reset_health()
         logger.info("=" * 50)
         if self.discovery_mode == "single":
             logger.info("run starting analysis for company: {}", self.company_query or self.industry)
@@ -612,5 +614,8 @@ class State(rx.State):
             self.cache_read_tokens = totals["cache_read"]
             self.stage = "done"
 
-        logger.info("run COMPLETE  total={:.1f}s", time.time() - run_start)
+        degraded = degraded_legs()
+        if degraded:
+            logger.warning("run HEALTH: degraded legs this run: {}", degraded)
+        logger.info("run COMPLETE  total={:.1f}s  health={}", time.time() - run_start, degraded or "ok")
         logger.info("=" * 50)

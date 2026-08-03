@@ -21,6 +21,8 @@ We normalise to a ratio inside _score_debt_equity.
 
 import yfinance as yf
 
+from gpt_investor.infra.resilience import resilient
+
 
 # --- per-dimension scoring helpers -----------------------------------------
 
@@ -196,6 +198,12 @@ def score_fundamentals(m: dict) -> dict:
 # --- data fetch ------------------------------------------------------------
 
 def fetch_fundamentals(ticker: str) -> dict:
+    # Critical leg — retry + serve-last-good so the score chip survives a
+    # transient .info failure instead of erroring the whole ticker.
+    return resilient("fundamentals", _fetch_fundamentals_raw, ticker, key=ticker)
+
+
+def _fetch_fundamentals_raw(ticker: str) -> dict:
     info = yf.Ticker(ticker).info
     return {
         "trailing_pe":      info.get("trailingPE"),
