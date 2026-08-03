@@ -235,19 +235,28 @@ def record_verdict(ticker: str, prompt_version: str, row: dict) -> None:
         logger.warning("[{}] record_verdict failed: {}", ticker, e)
 
 
-def verdicts_needing_outcome(price_col: str) -> list[dict]:
-    """Rows where `price_col` (one of the outcome columns) is still NULL.
+def verdicts_needing_outcome(price_col: str, spy_col: str) -> list[dict]:
+    """Rows where EITHER the ticker outcome (`price_col`) or its SPY benchmark
+    (`spy_col`) is still NULL — so a row whose ticker close filled but whose SPY
+    close missed its window still gets re-selected until both land.
 
-    Used by the nightly filler to find verdicts whose horizon may now be
-    resolvable. Returns `{id, ticker, date}` dicts.
+    Returns dicts with id/ticker/date, the capture `price` + `spy_at_capture`
+    (the filler scales these by the split-adjusted return factor), and the
+    current values of the two outcome columns so it fills only the NULL one.
     """
-    if price_col not in _VERDICT_OUTCOME_COLS:
-        raise ValueError(f"unknown outcome column: {price_col}")
+    for col in (price_col, spy_col):
+        if col not in _VERDICT_OUTCOME_COLS:
+            raise ValueError(f"unknown outcome column: {col}")
     with _conn() as conn:
         rows = conn.execute(
-            f"SELECT id, ticker, date FROM verdict_history WHERE {price_col} IS NULL"
+            f"SELECT id, ticker, date, price, spy_at_capture, {price_col}, {spy_col} "
+            f"FROM verdict_history WHERE {price_col} IS NULL OR {spy_col} IS NULL"
         ).fetchall()
-    return [{"id": r[0], "ticker": r[1], "date": r[2]} for r in rows]
+    return [
+        {"id": r[0], "ticker": r[1], "date": r[2], "price": r[3], "spy_at_capture": r[4],
+         "price_val": r[5], "spy_val": r[6]}
+        for r in rows
+    ]
 
 
 def set_verdict_outcomes(row_id: int, updates: dict) -> None:
