@@ -38,6 +38,17 @@ def _conn() -> sqlite3.Connection:
             text        TEXT NOT NULL
         )
     """)
+    # Plain-English verdict explanation, keyed by (ticker, date, prompt_version)
+    # so a prompt-version bump recomputes rather than serving stale prose.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS explainer (
+            ticker          TEXT NOT NULL,
+            date            TEXT NOT NULL,
+            prompt_version  TEXT NOT NULL,
+            text            TEXT NOT NULL,
+            PRIMARY KEY (ticker, date, prompt_version)
+        )
+    """)
     # Idempotent migration for older DBs that pre-date sentiment_json.
     cols = {row[1] for row in conn.execute("PRAGMA table_info(analyses)").fetchall()}
     if "sentiment_json" not in cols:
@@ -149,5 +160,27 @@ def save_cached_liquidity(text: str) -> None:
         conn.execute(
             "INSERT OR REPLACE INTO liquidity (key, fetched_at, text) VALUES (?,?,?)",
             ("default", time.time(), text),
+        )
+        conn.commit()
+
+
+def get_cached_explainer(ticker: str, prompt_version: str) -> str | None:
+    today = date.today().isoformat()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT text FROM explainer WHERE ticker=? AND date=? AND prompt_version=?",
+            (ticker, today, prompt_version),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_cached_explainer(ticker: str, prompt_version: str, text: str) -> None:
+    if not (text and text.strip()):
+        return
+    today = date.today().isoformat()
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO explainer (ticker, date, prompt_version, text) VALUES (?,?,?,?)",
+            (ticker, today, prompt_version, text),
         )
         conn.commit()

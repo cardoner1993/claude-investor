@@ -5,13 +5,20 @@ import markdown as md_lib
 import reflex as rx
 from loguru import logger
 
-from gpt_investor.storage.cache import get_cached, save_cached, get_cached_liquidity
+from gpt_investor.storage.cache import (
+    get_cached,
+    save_cached,
+    get_cached_liquidity,
+    get_cached_explainer,
+    save_cached_explainer,
+)
 from gpt_investor.llm.analysis import (
     get_sentiment_analysis,
     get_industry_analysis,
     get_final_analysis,
     get_liquidity_context,
 )
+from gpt_investor.llm.explainer import explain_verdict, PROMPT_VERSION
 from gpt_investor.data.market_data import (
     get_current_price,
     get_company_name,
@@ -224,6 +231,8 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    explainer_html: dict[str, str] = {} # ticker -> plain-English explanation (rendered HTML)
+    explainer_loading: bool = False     # true while the open dialog's explainer is generating
     liquidity_context: str = ""
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
@@ -252,6 +261,7 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_explainer_html: str = ""
 
     @rx.var
     def all_done(self) -> bool:
@@ -310,6 +320,7 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.explainer_html = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -373,6 +384,39 @@ class State(rx.State):
         )
         self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
+        # Plain-English explainer: show any memoized copy immediately, then fire
+        # the background generator to fill it on a miss.
+        self.selected_explainer_html = self.explainer_html.get(ticker, "")
+        return State.generate_explainer
+
+    @rx.event(background=True)
+    async def generate_explainer(self):
+        async with self:
+            ticker = self.selected_ticker
+            if not ticker or self.explainer_html.get(ticker):
+                return
+            self.explainer_loading = True
+            fund = self.fund_block.get(ticker, "")
+            sent = self.sent_block.get(ticker, "")
+            wyck = self.wyck_block.get(ticker, "")
+            macro = self.liquidity_context
+            verdict = self.analyses.get(ticker, "")
+
+        cached = await asyncio.to_thread(get_cached_explainer, ticker, PROMPT_VERSION)
+        if cached:
+            text = cached
+        else:
+            text = await asyncio.to_thread(explain_verdict, fund, sent, wyck, macro, verdict)
+            if text:
+                await asyncio.to_thread(save_cached_explainer, ticker, PROMPT_VERSION, text)
+
+        html = md_lib.markdown(text, extensions=["nl2br", "sane_lists"]) if text else ""
+        async with self:
+            if html:
+                self.explainer_html[ticker] = html
+            if self.selected_ticker == ticker:
+                self.selected_explainer_html = html
+            self.explainer_loading = False
 
     def close_ticker(self):
         self.selected_ticker = ""
@@ -388,6 +432,8 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_explainer_html = ""
+        self.explainer_loading = False
 
     def handle_submit(self, data: dict):
         industry = data.get("industry", "").strip()
