@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 """Nightly backfill of verdict_history forward returns.
 
-For every horizon (7/30/90/365d), find rows whose outcome column is still NULL
-and whose horizon has elapsed, then fill the ticker's close and SPY's close
-near (capture_date + horizon) using a ±5d trading-day window. Idempotent —
-only NULLs are touched, so re-running never overwrites a filled value.
+For every horizon (7/30/90/365d), find rows whose ticker OR SPY outcome is still
+NULL and whose horizon has elapsed, then fill each with the capture price scaled
+by the SPLIT-ADJUSTED return factor over the window. Using adjusted closes for
+both endpoints (and scaling the stored capture price by their ratio) keeps the
+return on one consistent basis, so a split between capture and horizon can't
+turn a flat stock into a −90% "return". Idempotent — only NULL cells are
+touched; the ticker and SPY legs fill independently.
 
 Schedule via cron/launchd, e.g. nightly at 22:00:
     0 22 * * *  cd /path/to/claude-investor && python scripts/fill_outcomes.py
@@ -24,17 +27,21 @@ from gpt_investor.storage.cache import verdicts_needing_outcome, set_verdict_out
 _HORIZONS = {"price_7d": 7, "price_30d": 30, "price_90d": 90, "price_365d": 365}
 _SPY_COL = {"price_7d": "spy_7d", "price_30d": "spy_30d",
             "price_90d": "spy_90d", "price_365d": "spy_365d"}
-_WINDOW = 5  # trading-day tolerance either side of the target date
+_WINDOW = 7  # calendar-day tolerance either side of the target date (covers long closures)
 
 _hist_cache: dict = {}
 
 
 def _history(ticker: str):
-    """Full daily close history for `ticker`, fetched once per run."""
+    """Full split/dividend-ADJUSTED daily close history, fetched once per run.
+
+    `auto_adjust=True` back-adjusts the whole series, so both endpoints of a
+    return sit on the same basis regardless of splits in between.
+    """
     if ticker in _hist_cache:
         return _hist_cache[ticker]
     try:
-        df = yf.Ticker(ticker).history(period="max", interval="1d", auto_adjust=False)
+        df = yf.Ticker(ticker).history(period="max", interval="1d", auto_adjust=True)
     except Exception as e:
         logger.warning("history fetch failed for {}: {}", ticker, e)
         df = None
@@ -42,8 +49,8 @@ def _history(ticker: str):
     return df
 
 
-def _close_near(ticker: str, target: date) -> float | None:
-    """Close on `target`, or the nearest trading day within ±_WINDOW days."""
+def _adj_close_near(ticker: str, target: date) -> float | None:
+    """Adjusted close on `target`, or the nearest day within ±_WINDOW."""
     df = _history(ticker)
     if df is None or df.empty:
         return None
@@ -57,29 +64,43 @@ def _close_near(ticker: str, target: date) -> float | None:
     return None
 
 
+def _return_factor(ticker: str, capture: date, target: date) -> float | None:
+    """Split-adjusted total-return factor between capture and target dates
+    (`adj_target / adj_capture`), or None if either close is unavailable."""
+    a = _adj_close_near(ticker, capture)
+    b = _adj_close_near(ticker, target)
+    if a is None or b is None or a == 0:
+        return None
+    return b / a
+
+
 def main() -> None:
     today = date.today()
     filled = 0
     for price_col, days in _HORIZONS.items():
-        rows = verdicts_needing_outcome(price_col)
+        spy_col = _SPY_COL[price_col]
+        rows = verdicts_needing_outcome(price_col, spy_col)
         for row in rows:
             capture = datetime.fromisoformat(row["date"]).date()
             target = capture + timedelta(days=days)
             if today < target:
                 continue  # horizon not elapsed yet
-            px = _close_near(row["ticker"], target)
-            spy = _close_near("SPY", target)
             updates = {}
-            if px is not None:
-                updates[price_col] = px
-            if spy is not None:
-                updates[_SPY_COL[price_col]] = spy
+            if row["price_val"] is None and row["price"]:
+                f = _return_factor(row["ticker"], capture, target)
+                if f is not None:
+                    updates[price_col] = row["price"] * f
+            if row["spy_val"] is None and row["spy_at_capture"]:
+                f = _return_factor("SPY", capture, target)
+                if f is not None:
+                    updates[spy_col] = row["spy_at_capture"] * f
             if updates:
                 set_verdict_outcomes(row["id"], updates)
                 filled += 1
                 logger.info(
-                    "filled {} {} ({}d): px={} spy={}",
-                    row["ticker"], row["date"], days, updates.get(price_col), updates.get(_SPY_COL[price_col]),
+                    "filled {} {} ({}d): {}",
+                    row["ticker"], row["date"], days,
+                    {k: round(v, 2) for k, v in updates.items()},
                 )
     logger.info("fill_outcomes done — {} cells filled", filled)
 
