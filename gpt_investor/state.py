@@ -5,7 +5,13 @@ import markdown as md_lib
 import reflex as rx
 from loguru import logger
 
-from gpt_investor.storage.cache import get_cached, save_cached, get_cached_liquidity
+from gpt_investor.storage.cache import get_cached, save_cached, get_cached_liquidity, record_verdict
+from gpt_investor.llm.verdict import (
+    PROMPT_VERSION,
+    parse_verdict,
+    parse_analyst_grade,
+    analyst_grade_to_score,
+)
 from gpt_investor.llm.analysis import (
     get_sentiment_analysis,
     get_industry_analysis,
@@ -58,12 +64,43 @@ def _resolve_single(query: str) -> dict[str, str]:
     return {}
 
 
+def _record_verdict_row(ticker, price, scored, sentiment, analyst_ratings,
+                        regime, wyck, final_analysis, spy_price):
+    """Capture a verdict-history row on the cache-miss path. Never blocks the
+    pipeline — record_verdict swallows its own DB errors."""
+    if not final_analysis:
+        return
+    parsed = parse_verdict(final_analysis)
+    grade = parse_analyst_grade(analyst_ratings)
+    raw = scored.get("raw", {})
+    record_verdict(ticker, PROMPT_VERSION, {
+        "price": price,
+        "fund_score": scored.get("score"),
+        "fund_tier": scored.get("tier"),
+        "sentiment_score": sentiment.get("score") if isinstance(sentiment, dict) else None,
+        "sentiment_conf": sentiment.get("confidence") if isinstance(sentiment, dict) else None,
+        "analyst_grade": grade,
+        "analyst_score": analyst_grade_to_score(grade),
+        "regime_label": regime.get("label") if regime else None,
+        "wyckoff_phase": wyck.get("phase") if wyck else None,
+        "wyckoff_score": wyck.get("score") if wyck else None,
+        "sector": raw.get("sector"),
+        "industry": raw.get("industry"),
+        "verdict": parsed["verdict"],
+        "confidence": parsed["confidence"],
+        "price_target": parsed["price_target"],
+        "sonnet_text": final_analysis,
+        "spy_at_capture": spy_price,
+    })
+
+
 async def _analyze_ticker(
     state,
     ticker: str,
     industry_task: "asyncio.Task[str] | None",
     liquidity_context: str = "",
     regime: dict | None = None,
+    spy_price: float | None = None,
 ):
     """`industry_task` is a Task whose result is the industry analysis string.
     Cached-path tickers don't need it (skipped). Live-path tickers await it
@@ -180,6 +217,10 @@ async def _analyze_ticker(
         _log(ticker, "final analysis done", time.time() - t)
 
         save_cached(ticker, sentiment, analyst_ratings, final_analysis)
+        _record_verdict_row(
+            ticker, price, scored, sentiment, analyst_ratings,
+            regime, wyck, final_analysis, spy_price,
+        )
 
         totals = get_token_totals()
         async with state:
@@ -512,6 +553,11 @@ class State(rx.State):
         # bundle, ~2-5s. Run every analysis (no cache; intraday data matters).
         regime_task = asyncio.create_task(asyncio.to_thread(get_market_regime))
 
+        # SPY at capture — benchmark baseline for verdict_history. Fetched once
+        # per run (not per ticker); the nightly filler compares each verdict's
+        # forward return against SPY's over the same window.
+        spy_task = asyncio.create_task(asyncio.to_thread(get_current_price, "SPY"))
+
         need_fetch = session_needs_liquidity and disk_liq is None
         if need_fetch:
             tickers_dict, liquidity_context = await asyncio.gather(
@@ -578,13 +624,19 @@ class State(rx.State):
         # Resolve market regime (started in parallel above). Skip-cached path
         # tickers don't need it (verdict already cached); live tickers consume it.
         regime: dict | None = None
+        spy_price: float | None = None
         if any_live:
             try:
                 regime = await regime_task
             except Exception as e:
                 logger.warning("market regime fetch failed: {}", e)
+            try:
+                spy_price = await spy_task
+            except Exception as e:
+                logger.warning("SPY benchmark fetch failed: {}", e)
         else:
             regime_task.cancel()
+            spy_task.cancel()
 
         totals = get_token_totals()
         async with self:
@@ -600,7 +652,7 @@ class State(rx.State):
 
         t = time.time()
         await asyncio.gather(*[
-            _analyze_ticker(self, ticker, industry_task, liquidity_context, regime)
+            _analyze_ticker(self, ticker, industry_task, liquidity_context, regime, spy_price)
             for ticker in tickers_dict
         ])
         logger.info("run all tickers done  ({:.1f}s)", time.time() - t)

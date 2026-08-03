@@ -38,6 +38,46 @@ def _conn() -> sqlite3.Connection:
             text        TEXT NOT NULL
         )
     """)
+    # Verdict history — the feedback loop. One row per (ticker, date, prompt_version)
+    # captured on the cache-MISS path only (a fresh verdict). Outcome + benchmark
+    # columns start NULL; scripts/fill_outcomes.py backfills them once the horizon
+    # has elapsed. Calibration groups these rows to measure edge. Inputs are stored
+    # raw — never code-adjusted — so the LLM verdict stays auditable.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS verdict_history (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker          TEXT NOT NULL,
+            date            TEXT NOT NULL,
+            created_at      REAL NOT NULL,
+            prompt_version  TEXT NOT NULL,
+            price           REAL,
+            fund_score      REAL,
+            fund_tier       TEXT,
+            sentiment_score REAL,
+            sentiment_conf  TEXT,
+            analyst_grade   TEXT,
+            analyst_score   REAL,
+            regime_label    TEXT,
+            wyckoff_phase   TEXT,
+            wyckoff_score   REAL,
+            sector          TEXT,
+            industry        TEXT,
+            verdict         TEXT,
+            confidence      TEXT,
+            price_target    REAL,
+            sonnet_text     TEXT,
+            spy_at_capture  REAL,
+            price_7d        REAL,
+            price_30d       REAL,
+            price_90d       REAL,
+            price_365d      REAL,
+            spy_7d          REAL,
+            spy_30d         REAL,
+            spy_90d         REAL,
+            spy_365d        REAL,
+            UNIQUE (ticker, date, prompt_version)
+        )
+    """)
     # Idempotent migration for older DBs that pre-date sentiment_json.
     cols = {row[1] for row in conn.execute("PRAGMA table_info(analyses)").fetchall()}
     if "sentiment_json" not in cols:
@@ -151,3 +191,82 @@ def save_cached_liquidity(text: str) -> None:
             ("default", time.time(), text),
         )
         conn.commit()
+
+
+# --- verdict history (feedback loop) ---------------------------------------
+
+# Columns a caller may set on insert. Outcome/benchmark columns are filled later
+# by the nightly job, not at capture time.
+_VERDICT_INPUT_COLS = (
+    "price", "fund_score", "fund_tier", "sentiment_score", "sentiment_conf",
+    "analyst_grade", "analyst_score", "regime_label", "wyckoff_phase",
+    "wyckoff_score", "sector", "industry", "verdict", "confidence",
+    "price_target", "sonnet_text", "spy_at_capture",
+)
+_VERDICT_OUTCOME_COLS = (
+    "price_7d", "price_30d", "price_90d", "price_365d",
+    "spy_7d", "spy_30d", "spy_90d", "spy_365d",
+)
+
+
+def record_verdict(ticker: str, prompt_version: str, row: dict) -> None:
+    """Insert one verdict-history row (cache-miss path only).
+
+    `row` may contain any of `_VERDICT_INPUT_COLS`; unknown keys are ignored.
+    Idempotent per (ticker, date, prompt_version) — a same-day re-run keeps the
+    first capture. Never raises into the pipeline; logs and swallows on failure.
+    """
+    today = date.today().isoformat()
+    cols = ["ticker", "date", "created_at", "prompt_version"]
+    vals: list = [ticker, today, time.time(), prompt_version]
+    for c in _VERDICT_INPUT_COLS:
+        if c in row:
+            cols.append(c)
+            vals.append(row[c])
+    placeholders = ",".join("?" for _ in cols)
+    try:
+        with _conn() as conn:
+            conn.execute(
+                f"INSERT OR IGNORE INTO verdict_history ({','.join(cols)}) VALUES ({placeholders})",
+                vals,
+            )
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.warning("[{}] record_verdict failed: {}", ticker, e)
+
+
+def verdicts_needing_outcome(price_col: str) -> list[dict]:
+    """Rows where `price_col` (one of the outcome columns) is still NULL.
+
+    Used by the nightly filler to find verdicts whose horizon may now be
+    resolvable. Returns `{id, ticker, date}` dicts.
+    """
+    if price_col not in _VERDICT_OUTCOME_COLS:
+        raise ValueError(f"unknown outcome column: {price_col}")
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, ticker, date FROM verdict_history WHERE {price_col} IS NULL"
+        ).fetchall()
+    return [{"id": r[0], "ticker": r[1], "date": r[2]} for r in rows]
+
+
+def set_verdict_outcomes(row_id: int, updates: dict) -> None:
+    """Fill outcome/benchmark columns on one row. Ignores unknown keys."""
+    fields = {k: v for k, v in updates.items() if k in _VERDICT_OUTCOME_COLS}
+    if not fields:
+        return
+    assignments = ",".join(f"{k}=?" for k in fields)
+    with _conn() as conn:
+        conn.execute(
+            f"UPDATE verdict_history SET {assignments} WHERE id=?",
+            [*fields.values(), row_id],
+        )
+        conn.commit()
+
+
+def all_verdicts() -> list[dict]:
+    """Every verdict-history row as a dict (calibration reads this)."""
+    with _conn() as conn:
+        cur = conn.execute("SELECT * FROM verdict_history")
+        names = [d[0] for d in cur.description]
+        return [dict(zip(names, r)) for r in cur.fetchall()]
