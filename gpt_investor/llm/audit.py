@@ -24,15 +24,48 @@ _MIN_SIMILAR = 5
 
 
 def _ret(price, fwd) -> float | None:
+    """Fractional forward return between entry and realised price.
+
+    Parameters
+    ----------
+    price : float | None
+        Entry price. Falsy or zero yields None.
+    fwd : float | None
+        Realised forward price.
+
+    Returns
+    -------
+    float | None
+        `(fwd - price) / price`, or None when either input is missing/zero.
+    """
     if not price or fwd is None or price == 0:
         return None
     return (fwd - price) / price
 
 
 def _match_score(v: dict, sector, fund_tier, regime_label) -> int:
-    """Count aligned attributes (sector / tier / regime). A None on either side
-    never counts — an unknown sector must not match every NULL-sector row, and
-    regime alone (market-wide, identical all run) must not qualify a case."""
+    """Count aligned attributes between a past verdict and the current one.
+
+    A None on either side never counts — an unknown sector must not match every
+    NULL-sector row, and regime alone (market-wide, identical every run) must not
+    qualify a case.
+
+    Parameters
+    ----------
+    v : dict
+        Past verdict row with `sector`, `fund_tier`, `regime_label` keys.
+    sector : str | None
+        Current verdict's sector.
+    fund_tier : str | None
+        Current verdict's fundamental tier.
+    regime_label : str | None
+        Current market-regime label.
+
+    Returns
+    -------
+    int
+        Number of aligned attributes (0–3).
+    """
     score = 0
     if sector and v.get("sector") == sector:
         score += 1
@@ -49,9 +82,31 @@ def get_similar_past(sector, fund_tier, regime_label, horizon: int = 30, limit: 
 
     Similarity requires at least `min_match` of {sector, fund_tier, regime_label}
     to align (regime-only or None-only matches don't qualify). Only rows with a
-    realised `price_{horizon}d` outcome count. Returns up to `limit` cases,
-    balanced between wins and losses so an agent can't just pattern-match "it
-    always goes up".
+    realised `price_{horizon}d` outcome count. The sample is balanced between
+    wins and losses so an agent can't just pattern-match "it always goes up".
+
+    Parameters
+    ----------
+    sector : str | None
+        Current verdict's sector.
+    fund_tier : str | None
+        Current verdict's fundamental tier.
+    regime_label : str | None
+        Current market-regime label.
+    horizon : int, optional
+        Forward-return window in days, default 30 (selects the `price_{horizon}d`
+        column).
+    limit : int, optional
+        Max cases returned, default 6.
+    min_match : int, optional
+        Minimum aligned attributes required, default 2.
+
+    Returns
+    -------
+    list[dict]
+        Up to `limit` case dicts, each with `ticker`, `verdict`, `fund_tier`,
+        `sector`, `regime_label`, `wyckoff_phase`, `ret` (float) and `win` (bool),
+        drawn evenly from wins and losses.
     """
     price_col = f"price_{horizon}d"
     wins: list[dict] = []
@@ -80,6 +135,19 @@ def get_similar_past(sector, fund_tier, regime_label, horizon: int = 30, limit: 
 
 
 def format_cases(cases: list[dict]) -> str:
+    """Render similar past cases as a markdown bullet list for the prompt.
+
+    Parameters
+    ----------
+    cases : list[dict]
+        Case dicts from `get_similar_past`.
+
+    Returns
+    -------
+    str
+        One line per case (ticker, tier/phase/regime, verdict, realised return,
+        WIN/LOSS), or a "No comparable past cases." placeholder when empty.
+    """
     if not cases:
         return "No comparable past cases."
     lines = ["Similar past verdicts and realised outcomes:"]
@@ -93,6 +161,30 @@ def format_cases(cases: list[dict]) -> str:
 
 
 def _run_agent(role: str, focus_block: str, verdict_md: str, cases: list[dict], lens: str) -> dict:
+    """Run one single-lens haiku auditor against the verdict and past cases.
+
+    The agent sees only its own lens's evidence, never the other layers, so the
+    two audits stay disjoint.
+
+    Parameters
+    ----------
+    role : str
+        Auditor role label (e.g. "financial").
+    focus_block : str
+        Lens-specific evidence shown to the agent.
+    verdict_md : str
+        Proposed verdict markdown under review.
+    cases : list[dict]
+        Similar past cases with realised outcomes.
+    lens : str
+        Lens name used in prompt phrasing.
+
+    Returns
+    -------
+    dict
+        `{label, note}`; falls back to `{"caution", "audit unavailable ..."}`
+        when structured parsing fails.
+    """
     system_prompt = (
         f"You are a skeptical {role} auditor. You see ONLY the {lens} evidence and the "
         f"proposed verdict — not the other layers. Using the realised outcomes of similar "
@@ -111,19 +203,81 @@ def _run_agent(role: str, focus_block: str, verdict_md: str, cases: list[dict], 
 
 
 def audit_financial(verdict_md: str, fund_block: str, cases: list[dict]) -> dict:
+    """Audit the verdict through the financial lens only.
+
+    Parameters
+    ----------
+    verdict_md : str
+        Proposed verdict markdown.
+    fund_block : str
+        Fundamental evidence block.
+    cases : list[dict]
+        Similar past cases with realised outcomes.
+
+    Returns
+    -------
+    dict
+        `{label, note}` from the financial auditor.
+    """
     return _run_agent("financial", fund_block, verdict_md, cases, "financial")
 
 
 def audit_sentiment(verdict_md: str, sentiment_block: str, cases: list[dict]) -> dict:
+    """Audit the verdict through the sentiment lens only.
+
+    Parameters
+    ----------
+    verdict_md : str
+        Proposed verdict markdown.
+    sentiment_block : str
+        Sentiment evidence block.
+    cases : list[dict]
+        Similar past cases with realised outcomes.
+
+    Returns
+    -------
+    dict
+        `{label, note}` from the sentiment auditor.
+    """
     return _run_agent("sentiment", sentiment_block, verdict_md, cases, "sentiment")
 
 
 def worst_label(*labels: str) -> str:
+    """Pick the most cautious of several audit labels.
+
+    Ranks agree < caution < disagree and returns the highest — a single
+    disagreement dominates.
+
+    Parameters
+    ----------
+    *labels : str
+        One or more of "agree" / "caution" / "disagree".
+
+    Returns
+    -------
+    str
+        The worst-ranked label.
+    """
     return max(labels, key=lambda label: _LABEL_RANK.get(label, 0))
 
 
 def combine_audits(fin: dict, sent: dict) -> dict:
-    """Merge the two agents into `{label, text}`; label is the worst of two."""
+    """Merge the two agents into one label plus a rendered note.
+
+    Combined label is the worst of the two (a single disagreement dominates).
+
+    Parameters
+    ----------
+    fin : dict
+        Financial audit `{label, note}`.
+    sent : dict
+        Sentiment audit `{label, note}`.
+
+    Returns
+    -------
+    dict
+        `{label, text}` where `text` is markdown summarising both lenses.
+    """
     label = worst_label(fin["label"], sent["label"])
     text = (
         f"**Audit: {label}**\n\n"
@@ -134,10 +288,31 @@ def combine_audits(fin: dict, sent: dict) -> dict:
 
 
 def enough_history(cases: list[dict]) -> bool:
+    """Gate: whether enough similar past cases exist to run the audits.
+
+    Parameters
+    ----------
+    cases : list[dict]
+        Balanced similar cases from `get_similar_past`.
+
+    Returns
+    -------
+    bool
+        True when at least `_MIN_SIMILAR` cases are available.
+    """
     return len(cases) >= _MIN_SIMILAR
 
 
 def log_gate(ticker: str, n: int) -> None:
+    """Log how many balanced similar cases the audit gate found.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker being audited.
+    n : int
+        Count of balanced similar cases with realised outcomes.
+    """
     logger.bind(ticker=ticker).info(
         "audit gate: {} balanced similar cases w/ outcomes (need {})", n, _MIN_SIMILAR
     )

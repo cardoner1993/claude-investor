@@ -130,9 +130,31 @@ def _record_verdict_row(ticker, price, scored, sentiment, analyst_ratings,
 
 
 async def _run_audits(state, ticker, scored, regime, final_analysis, fund_block, sent_block):
-    """Advisory audit pass. Isolated from the verdict lifecycle: the caller runs
-    this only after the verdict is published + persisted, inside its own
-    try/except, so nothing here can error or hide a finished verdict."""
+    """Advisory audit pass over a published verdict.
+
+    Isolated from the verdict lifecycle: the caller runs this only after the
+    verdict is published + persisted, inside its own try/except, so nothing here
+    can error or hide a finished verdict. Gated — returns early when too few
+    similar past cases exist. On success, writes the combined label/color/block
+    into state and refreshes the open dialog live.
+
+    Parameters
+    ----------
+    state : State
+        Reflex state to mutate with audit results.
+    ticker : str
+        Ticker under audit.
+    scored : dict
+        Fundamental score dict with `tier` and `raw.sector`.
+    regime : dict | None
+        Market-regime dict with `label`, or None.
+    final_analysis : str
+        Published verdict markdown to critique.
+    fund_block : str
+        Fundamental evidence block for the financial auditor.
+    sent_block : str
+        Sentiment evidence block for the sentiment auditor.
+    """
     sector = scored.get("raw", {}).get("sector")
     regime_label = regime.get("label") if regime else None
     cases = await asyncio.to_thread(get_similar_past, sector, scored["tier"], regime_label)
