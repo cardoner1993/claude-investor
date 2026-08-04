@@ -43,6 +43,17 @@ _TIER_COLORS = {
 
 
 def _log(ticker: str, step: str, elapsed: float | None = None):
+    """Emit a ticker-scoped log line, optionally with an elapsed time.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol the log line is bound to.
+    step : str
+        Message describing the current step.
+    elapsed : float | None, optional
+        Seconds to append as ``(N.Ns)``. Omitted when None (the default).
+    """
     if elapsed is not None:
         logger.bind(ticker=ticker).info("{}  ({:.1f}s)", step, elapsed)
     else:
@@ -50,7 +61,18 @@ def _log(ticker: str, step: str, elapsed: float | None = None):
 
 
 def _resolve_single(query: str) -> dict[str, str]:
-    """Resolve a company name or ticker to a single-entry pending dict."""
+    """Resolve a company name or ticker to a single-entry pending dict.
+
+    Parameters
+    ----------
+    query : str
+        Free-text ticker or company name.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{ticker: "pending"}`` on success, empty dict on failure.
+    """
     ticker = resolve_ticker(query)
     if ticker:
         return {ticker: "pending"}
@@ -65,10 +87,26 @@ async def _analyze_ticker(
     liquidity_context: str = "",
     regime: dict | None = None,
 ):
-    """`industry_task` is a Task whose result is the industry analysis string.
-    Cached-path tickers don't need it (skipped). Live-path tickers await it
-    just before the sonnet call so it runs in parallel with sentiment/news/etc.
-    None means caller pre-determined no tickers needed it (all cached).
+    """Run the full analysis pipeline for one ticker and publish results to state.
+
+    Cache hits skip the pipeline and only refresh price/name/fundamentals/wyckoff.
+    Cancellation is honoured at await boundaries.
+
+    Parameters
+    ----------
+    state : State
+        Reflex state instance mutated under ``async with``.
+    ticker : str
+        Symbol to analyze.
+    industry_task : asyncio.Task[str] | None
+        Task whose result is the industry analysis string. Cached-path tickers
+        don't need it (skipped); live-path tickers await it just before the
+        sonnet call so it runs in parallel with sentiment/news/etc. None means
+        the caller pre-determined no tickers needed it (all cached).
+    liquidity_context : str, optional
+        Global liquidity snapshot passed to the final analysis. Default "".
+    regime : dict | None, optional
+        Market-regime bundle passed to the final analysis. Default None.
     """
     ticker_start = time.time()
     try:
@@ -255,13 +293,24 @@ class State(rx.State):
 
     @rx.var
     def all_done(self) -> bool:
+        """Whether every ticker has reached a terminal status.
+
+        Returns
+        -------
+        bool
+            True when there is at least one ticker and all are finished,
+            cached, error, or cancelled.
+        """
         return (
             len(self.tickers) > 0
             and all(v in ("finished", "cached", "error", "cancelled") for v in self.tickers.values())
         )
 
     def load_mock_data(self):
-        """Inject fake finished tickers to test the dialog without running analysis."""
+        """Inject fake finished tickers to test the dialog without running analysis.
+
+        Sets ``liquidity_is_mock`` so the next real run re-fetches liquidity.
+        """
         mock_analysis = (
             "**Verdict**: Buy — strong momentum with solid fundamentals.\n\n"
             "**Price Target**: $150  (current: $120.00)\n\n"
@@ -298,6 +347,7 @@ class State(rx.State):
         self.liquidity_is_mock = True
 
     def _reset_tickers(self):
+        """Clear all per-ticker maps and the selected ticker before a new run."""
         self.tickers = {}
         self.analyses = {}
         self.names = {}
@@ -313,9 +363,30 @@ class State(rx.State):
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
+        """Bind the custom-industry text input.
+
+        Parameters
+        ----------
+        value : str
+            Current input value.
+        """
         self.industry_input = value
 
     def industry_pick(self, label: str, yf_key: str):
+        """Start an industry run from an accordion chip, bypassing keyword lookup.
+
+        Parameters
+        ----------
+        label : str
+            Industry display name.
+        yf_key : str
+            Yahoo Finance industry key used directly by discovery.
+
+        Returns
+        -------
+        EventSpec
+            ``State.fetch_analyses`` to run the pipeline.
+        """
         self.industry = label
         self.industry_input = label
         self.discovery_mode = "industry"
@@ -325,6 +396,13 @@ class State(rx.State):
         return State.fetch_analyses
 
     def trending_pick(self):
+        """Start a run over today's trending tickers from YF news mentions.
+
+        Returns
+        -------
+        EventSpec
+            ``State.fetch_analyses`` to run the pipeline.
+        """
         self.industry = "Today's Trending"
         self.industry_input = ""
         self.discovery_mode = "trending"
@@ -335,6 +413,11 @@ class State(rx.State):
 
     @rx.event(background=True)
     async def fetch_trending_industries(self):
+        """Populate the trending-industries badges in the background.
+
+        Sets a loading flag while ``get_trending_industries`` runs off-thread,
+        then stores each result as ``[display, yf_key]``.
+        """
         async with self:
             self.trending_industries_loading = True
             self.trending_industries = []
@@ -344,12 +427,26 @@ class State(rx.State):
             self.trending_industries_loading = False
 
     def toggle_sector(self, sector: str):
+        """Expand or collapse a sector header in the taxonomy accordion.
+
+        Parameters
+        ----------
+        sector : str
+            Sector display name to toggle.
+        """
         if sector in self.expanded_sectors:
             self.expanded_sectors.remove(sector)
         else:
             self.expanded_sectors.append(sector)
 
     def open_ticker(self, ticker: str):
+        """Open the analysis dialog for a ticker, rendering its blocks to HTML.
+
+        Parameters
+        ----------
+        ticker : str
+            Symbol whose card was clicked.
+        """
         self.selected_ticker = ticker
         self.selected_name = self.names.get(ticker, "")
         self.selected_is_cached = self.tickers.get(ticker) == "cached"
@@ -375,6 +472,7 @@ class State(rx.State):
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
 
     def close_ticker(self):
+        """Close the analysis dialog and clear all selected-ticker fields."""
         self.selected_ticker = ""
         self.selected_name = ""
         self.selected_is_cached = False
@@ -390,6 +488,18 @@ class State(rx.State):
         self.selected_wyck_color = ""
 
     def handle_submit(self, data: dict):
+        """Start an industry run from the custom-industry form submission.
+
+        Parameters
+        ----------
+        data : dict
+            Form payload with an ``"industry"`` key.
+
+        Returns
+        -------
+        EventSpec or None
+            ``State.fetch_analyses`` when the industry is non-empty, else None.
+        """
         industry = data.get("industry", "").strip()
         if industry:
             self.industry = industry
@@ -401,6 +511,13 @@ class State(rx.State):
             return State.fetch_analyses
 
     def set_company_query(self, value: str):
+        """Bind the single-company search input.
+
+        Parameters
+        ----------
+        value : str
+            Current input value.
+        """
         self.company_query = value
 
     def handle_company_submit(self, data: dict):
@@ -410,6 +527,11 @@ class State(rx.State):
         wrong ticker silently (e.g. "ACS" → "GGAL"). Now the resolution is
         shown to the user with alternatives; they hit Confirm to run or
         Cancel/Edit to retype.
+
+        Parameters
+        ----------
+        data : dict
+            Form payload with a ``"company"`` key.
         """
         query = data.get("company", "").strip()
         if not query:
@@ -438,7 +560,18 @@ class State(rx.State):
         self.stage = "confirming"
 
     def confirm_pending_with(self, ticker: str):
-        """User picked one of the candidates — kick off the pipeline on that ticker."""
+        """Kick off the single-company pipeline on a user-confirmed candidate.
+
+        Parameters
+        ----------
+        ticker : str
+            Symbol the user picked from the pending candidates.
+
+        Returns
+        -------
+        EventSpec or None
+            ``State.fetch_analyses`` when a ticker is given, else None.
+        """
         if not ticker:
             return
         self.industry = ticker
@@ -452,7 +585,7 @@ class State(rx.State):
         return State.fetch_analyses
 
     def cancel_pending(self):
-        """User rejected the resolved ticker — back to the search form."""
+        """Discard pending candidates and return to the search form."""
         self._clear_pending()
         self.stage = "stopped"
 
@@ -468,10 +601,19 @@ class State(rx.State):
         logger.info("cancel requested by user")
 
     def _clear_pending(self):
+        """Clear the pending ticker-resolution candidates."""
         self.pending_candidates = []
 
     async def _mark_cancelled(self, where: str):
-        """Called from inside the background task when cancel_requested is set."""
+        """Mark in-flight tickers cancelled and reset the run to a stopped state.
+
+        Called from inside the background task when ``cancel_requested`` is set.
+
+        Parameters
+        ----------
+        where : str
+            Label of the await boundary where cancellation was detected, for logs.
+        """
         logger.warning("run cancelled by user ({})", where)
         async with self:
             for t in list(self.tickers):
@@ -483,6 +625,13 @@ class State(rx.State):
 
     @rx.event(background=True)
     async def fetch_analyses(self):
+        """Run the full analysis pipeline for the current discovery mode.
+
+        Discovers tickers, resolves liquidity (session/disk-cache/fetched) and
+        market regime in parallel, schedules the industry analysis only when at
+        least one ticker is live, then fans out ``_analyze_ticker`` across all
+        tickers. Honours cooperative cancellation at each await boundary.
+        """
         async with self:
             self.error_message = ""
         run_start = time.time()

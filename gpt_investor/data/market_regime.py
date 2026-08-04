@@ -36,6 +36,19 @@ RegimeLabel = Literal[
 
 
 def _direction(delta: float, eps: float = 1e-6) -> Literal["rising", "falling", "flat"]:
+    """Tag a delta as rising/falling/flat against a dead-band.
+
+    Parameters
+    ----------
+    delta : float
+        Change to classify.
+    eps : float, optional
+        Dead-band half-width; |delta| <= eps is flat. Default 1e-6.
+
+    Returns
+    -------
+    {"rising", "falling", "flat"}
+    """
     if delta > eps:
         return "rising"
     if delta < -eps:
@@ -44,6 +57,18 @@ def _direction(delta: float, eps: float = 1e-6) -> Literal["rising", "falling", 
 
 
 def _safe_float(x) -> float | None:
+    """Coerce to float, mapping NaN and bad input to None.
+
+    Parameters
+    ----------
+    x : object
+        Value to coerce.
+
+    Returns
+    -------
+    float or None
+        The float, or None on NaN / TypeError / ValueError.
+    """
     try:
         v = float(x)
         return v if not math.isnan(v) else None
@@ -52,11 +77,18 @@ def _safe_float(x) -> float | None:
 
 
 def get_market_regime() -> dict:
-    """Fetch indicators + classify regime. One yfinance download call.
+    """Fetch indicators and classify regime in one yfinance download call.
 
-    Returns a dict suitable for `format_regime()` and for inclusion in the
-    final-analysis prompt. On any fetch failure, returns a partial dict with
-    `label = "mixed"` and whatever indicators were obtainable.
+    On any fetch failure, returns a partial dict with `label = "mixed"` and
+    whatever indicators were obtainable.
+
+    Returns
+    -------
+    dict
+        Keys: `as_of` (ISO date str), `indicators` (per-key dict of
+        value/delta_5d/direction), `curve` (float pp or None),
+        `curve_direction` (str), `label` (RegimeLabel), `summary` (str).
+        Suitable for `format_regime()` and the final-analysis prompt.
     """
     end = datetime.utcnow().date() + timedelta(days=1)
     start = end - timedelta(days=14)  # extra buffer for weekends/holidays
@@ -134,11 +166,23 @@ def get_market_regime() -> dict:
 
 
 def classify_regime(indicators: dict[str, dict], curve: float | None) -> RegimeLabel:
-    """Deterministic regime label from indicator dict.
+    """Deterministic regime label from an indicator dict.
 
     Pure function — exposed for unit testing. Rules ordered from most-extreme
     to most-benign; first match wins. Falls back to "mixed" if any required
     input is missing.
+
+    Parameters
+    ----------
+    indicators : dict[str, dict]
+        Per-key dicts carrying at least `value` and `direction`.
+    curve : float or None
+        10y−3m spread in percentage points.
+
+    Returns
+    -------
+    RegimeLabel
+        One of the five regime labels.
     """
     vix = indicators.get("vix", {}).get("value")
     hyg_dir = indicators.get("hyg", {}).get("direction")
@@ -167,7 +211,22 @@ def classify_regime(indicators: dict[str, dict], curve: float | None) -> RegimeL
 
 
 def _summary(indicators: dict, curve: float | None, label: RegimeLabel) -> str:
-    """One-line human summary. `curve` is in percentage points."""
+    """One-line human summary of the regime.
+
+    Parameters
+    ----------
+    indicators : dict
+        Per-key indicator dicts.
+    curve : float or None
+        10y−3m spread in percentage points.
+    label : RegimeLabel
+        Classified regime label.
+
+    Returns
+    -------
+    str
+        Space-joined summary sentence.
+    """
     vix = indicators.get("vix", {}).get("value")
     parts: list[str] = [f"Regime: {label}."]
     if vix is not None:
@@ -184,6 +243,23 @@ _DIR_ARROW = {"rising": "↑", "falling": "↓", "flat": "→", "unknown": "?"}
 
 
 def _fmt_value(key: str, value: float | None) -> str:
+    """Format an indicator value with per-key units.
+
+    TNX/IRX are divided by 10 into a percent; gold is a thousands-grouped
+    integer; the rest are two-decimal floats.
+
+    Parameters
+    ----------
+    key : str
+        Indicator key (`vix`, `tnx`, `irx`, `dxy`, `hyg`, `gold`).
+    value : float or None
+        Raw value; None renders as "n/a".
+
+    Returns
+    -------
+    str
+        Formatted value string.
+    """
     if value is None:
         return "n/a"
     # TNX and IRX are quoted in tenths of a percent on yfinance (e.g. 42.1 = 4.21%)
@@ -197,7 +273,20 @@ def _fmt_value(key: str, value: float | None) -> str:
 
 
 def format_regime(regime: dict) -> str:
-    """Markdown block for the liquidity_panel UI and the final-analysis prompt."""
+    """Render a regime dict as a markdown block.
+
+    Used by the liquidity_panel UI and the final-analysis prompt.
+
+    Parameters
+    ----------
+    regime : dict
+        Output of `get_market_regime()`.
+
+    Returns
+    -------
+    str
+        Newline-joined markdown lines.
+    """
     label = regime.get("label", "unknown")
     indicators = regime.get("indicators", {})
     curve = regime.get("curve")

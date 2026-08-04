@@ -103,7 +103,22 @@ _KEYWORD_TO_YF_SECTOR: dict[str, str] = {
 
 
 def _yf_lookup(industry: str) -> tuple[str | None, str]:
-    """Return (key, type) where type is 'industry' or 'sector', or (None, '') if no match."""
+    """Map an industry string to a Yahoo Finance key via keyword matching.
+
+    Industry keys are checked longest-first (more specific wins), then sector
+    keys as a fallback.
+
+    Parameters
+    ----------
+    industry : str
+        Free-text industry name.
+
+    Returns
+    -------
+    tuple[str | None, str]
+        ``(key, type)`` where type is ``'industry'`` or ``'sector'``, or
+        ``(None, '')`` if no keyword matched.
+    """
     lower = industry.lower()
     # Check industry keys longest-first (more specific wins)
     for keyword, key in sorted(_KEYWORD_TO_YF_INDUSTRY.items(), key=lambda x: -len(x[0])):
@@ -117,11 +132,26 @@ def _yf_lookup(industry: str) -> tuple[str | None, str]:
 
 
 def _get_yf_tickers(industry: str, num: int, yf_key_override: str = "") -> list[str]:
-    """
-    Yahoo Finance-centric ticker discovery:
-    1. Primary: yf.Industry / yf.Sector top_companies (Yahoo's own authoritative rankings)
-    2. News reordering: most-discussed in YF news appears first
-    Both results are cached to avoid redundant HTTP calls on repeat runs.
+    """Discover tickers for an industry from Yahoo Finance, news-reordered.
+
+    Primary source is ``yf.Industry`` / ``yf.Sector`` ``top_companies`` (Yahoo's
+    authoritative rankings), then reordered so the most-discussed in YF news
+    appear first. Both the company list (4h) and news counts (15min) are cached
+    to avoid redundant HTTP calls on repeat runs.
+
+    Parameters
+    ----------
+    industry : str
+        Free-text industry name, used for keyword lookup and news search.
+    num : int
+        Target number of tickers to return.
+    yf_key_override : str, optional
+        Explicit YF industry key that bypasses keyword matching. Default ``""``.
+
+    Returns
+    -------
+    list[str]
+        Up to ``num`` base ticker symbols, or ``[]`` if no YF match.
     """
     from collections import Counter
 
@@ -197,6 +227,23 @@ _TICKER_SCHEMA = json.dumps({
 
 
 def _claude_tickers(industry: str, num_tickers: int) -> tuple[list[str], dict]:
+    """Ask Claude (with WebSearch) for trending tickers in an industry.
+
+    Runs the Claude CLI with a JSON schema and parses ``structured_output``.
+
+    Parameters
+    ----------
+    industry : str
+        Industry to search news for.
+    num_tickers : int
+        Number of ticker symbols to request.
+
+    Returns
+    -------
+    tuple[list[str], dict]
+        ``(tickers, model_usage)`` — stripped ticker symbols and the CLI's
+        ``modelUsage`` dict for token accounting.
+    """
     system_prompt = (
         f"You are a financial analyst assistant. Find the {num_tickers} most actively discussed "
         f"and newsworthy companies in the {industry} industry right now based on current news."
@@ -225,6 +272,25 @@ def _claude_tickers(industry: str, num_tickers: int) -> tuple[list[str], dict]:
 
 
 def generate_ticker_ideas(industry, num_tickers: int = MAX_TICKERS_TO_ANALYZE, yf_key_override: str = "") -> dict[str, str]:
+    """Build the ticker set for an industry, filling YF gaps with Claude.
+
+    Uses Yahoo Finance first; if it returns fewer than ``num_tickers``, asks
+    Claude for the remainder and merges without duplicates (YF first).
+
+    Parameters
+    ----------
+    industry : str
+        Free-text industry name.
+    num_tickers : int, optional
+        Target ticker count. Default ``MAX_TICKERS_TO_ANALYZE``.
+    yf_key_override : str, optional
+        Explicit YF industry key that bypasses keyword matching. Default ``""``.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{ticker: "pending"}`` for each selected ticker.
+    """
     yf_tickers = _get_yf_tickers(industry, num_tickers, yf_key_override)
 
     if len(yf_tickers) >= num_tickers:
@@ -271,6 +337,21 @@ _TRENDING_INDUSTRIES_CACHE_KEY = "trending_industries"
 
 
 def get_trending_tickers(num: int = MAX_TICKERS_TO_ANALYZE) -> dict[str, str]:
+    """Rank the most-mentioned tickers across trending YF news searches.
+
+    Cached 30min. Filters out non-equity symbols (dots, ``=``, ``^``, longer
+    than 5 chars, non-uppercase).
+
+    Parameters
+    ----------
+    num : int, optional
+        Number of tickers to return. Default ``MAX_TICKERS_TO_ANALYZE``.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{ticker: "pending"}`` for the top ``num`` tickers.
+    """
     from collections import Counter
 
     with _yf_lock:
@@ -300,12 +381,22 @@ def get_trending_tickers(num: int = MAX_TICKERS_TO_ANALYZE) -> dict[str, str]:
 
 
 def get_trending_industries(num: int = 5) -> list[tuple[str, str]]:
-    """
-    Find trending industries by:
-    1. Scanning YF news for the most-mentioned tickers (same terms as trending tickers)
-    2. Looking up each ticker's industryKey in parallel
-    3. Ranking industries by weighted mention count
-    Returns [(display_name, yf_key), ...] up to `num` entries.
+    """Rank trending industries from the most-mentioned tickers in YF news.
+
+    Scans YF news for top tickers (same terms as trending tickers), looks up
+    each ticker's ``industryKey`` in parallel, then ranks industries by weighted
+    mention count. Cached 30min.
+
+    Parameters
+    ----------
+    num : int, optional
+        Number of industries to return. Default ``5``.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        ``[(display_name, yf_key), ...]`` up to ``num`` entries; ``[]`` if no
+        tickers were found.
     """
     from collections import Counter
 
@@ -333,6 +424,15 @@ def get_trending_industries(num: int = 5) -> list[tuple[str, str]]:
     ticker_industries: dict[str, tuple[str, str]] = {}
 
     def _fetch_industry(ticker: str) -> None:
+        """Look up a ticker's industry and record it in ``ticker_industries``.
+
+        Silently skips tickers whose info lacks an industry key/display.
+
+        Parameters
+        ----------
+        ticker : str
+            Ticker symbol to resolve.
+        """
         try:
             info = yf.Ticker(ticker).info
             key = info.get("industryKey", "")
@@ -381,19 +481,48 @@ _YF_SECTOR_ORDER: list[tuple[str, str]] = [
 
 
 def _key_to_display(key: str) -> str:
-    """'oil-gas-e-p' → 'Oil Gas E-P'  (title-case, preserve hyphens after first word)"""
+    """Title-case a hyphenated YF key for display.
+
+    E.g. ``'oil-gas-e-p'`` → ``'Oil Gas E-P'`` (capitalizes each word, keeps
+    hyphens as spaces).
+
+    Parameters
+    ----------
+    key : str
+        Hyphen-separated YF key.
+
+    Returns
+    -------
+    str
+        Human-readable display name.
+    """
     return " ".join(w.capitalize() for w in key.split("-"))
 
 
 def get_yf_industry_groups() -> list[tuple[str, list[tuple[str, str]]]]:
-    """
-    Fetch YF's full industry taxonomy grouped by sector.
-    All sectors are fetched in parallel; each has a 10s timeout.
-    Returns [] if all sectors fail (caller should use a hardcoded fallback).
+    """Fetch YF's full industry taxonomy grouped by sector.
+
+    All sectors are fetched in parallel with a 10s per-thread timeout.
+
+    Returns
+    -------
+    list[tuple[str, list[tuple[str, str]]]]
+        ``[(sector_display, [(industry_display, industry_key), ...]), ...]`` in
+        ``_YF_SECTOR_ORDER``; ``[]`` if all sectors fail (caller should use a
+        hardcoded fallback).
     """
     results: dict[str, tuple[str, list[tuple[str, str]]]] = {}
 
     def _fetch(sector_key: str, sector_display: str) -> None:
+        """Fetch one sector's industries and record them in ``results``.
+
+        Parameters
+        ----------
+        sector_key : str
+            YF sector key to query.
+        sector_display : str
+            Display name stored alongside the industry pairs.
+        """
         try:
             df = yf.Sector(sector_key).industries
             if df is not None and not df.empty:
@@ -417,18 +546,42 @@ def get_yf_industry_groups() -> list[tuple[str, list[tuple[str, str]]]]:
 
 
 def _name_of(q: dict) -> str:
+    """Extract a display name from a yfinance Search quote.
+
+    Tries long/short name variants in both casings.
+
+    Parameters
+    ----------
+    q : dict
+        A yfinance ``Search.quotes`` entry.
+
+    Returns
+    -------
+    str
+        First non-empty name field, or ``""``.
+    """
     return (q.get("longname") or q.get("longName")
             or q.get("shortname") or q.get("shortName") or "")
 
 
 def _score_quote(query: str, q: dict) -> float:
-    """Rank a yfinance Search quote by how well it matches `query`.
+    """Rank a yfinance Search quote by how well it matches ``query``.
 
-    Sum of:
-      * `SequenceMatcher` ratio between query and longName/shortName  (0-1)
-      * symbol-exact-match bonus                                       (0-1)
-      * token-overlap bonus (query words present in name)              (0-0.3)
-    Higher = better.
+    Score is ``max(name_score, sym_score) + overlap`` where name_score is the
+    ``SequenceMatcher`` ratio (0-1), sym_score is a symbol-match bonus (0-1),
+    and overlap is a token-overlap bonus (0-0.3). Higher = better.
+
+    Parameters
+    ----------
+    query : str
+        User's raw query.
+    q : dict
+        A yfinance ``Search.quotes`` entry.
+
+    Returns
+    -------
+    float
+        Match score; higher is a better match.
     """
     import difflib
 
@@ -459,15 +612,22 @@ def _score_quote(query: str, q: dict) -> float:
 
 
 def resolve_ticker_verbose(query: str) -> dict | None:
-    """Resolve `query` to the best-matching ticker + return alternatives.
+    """Resolve ``query`` to the best-matching ticker plus alternatives.
 
-    Returns `{symbol, name, exchange, score, alternatives}` or None if no
-    candidates. Allows dot-tickers (`ACS.MC`, `BMW.DE`) — picks whichever
-    EQUITY scores highest by name match, not the first dotless one.
+    Allows dot-tickers (``ACS.MC``, ``BMW.DE``) — picks whichever EQUITY scores
+    highest by name match, not the first dotless one.
 
-    `alternatives` is a list of `(symbol, name, score)` tuples for the
-    next-best matches, useful for surfacing to the user when the top
-    pick looks wrong.
+    Parameters
+    ----------
+    query : str
+        Ticker or company name to resolve.
+
+    Returns
+    -------
+    dict | None
+        ``{symbol, name, exchange, score, alternatives}`` where ``alternatives``
+        is a list of ``(symbol, name, score)`` tuples for the next-best matches;
+        ``None`` if no candidates.
     """
     query = query.strip()
     if not query:
@@ -514,6 +674,19 @@ def resolve_ticker_verbose(query: str) -> dict | None:
 
 
 def resolve_ticker(query: str) -> str | None:
-    """Back-compat wrapper — returns only the top symbol or None."""
+    """Resolve ``query`` to a single top ticker symbol.
+
+    Back-compat wrapper around :func:`resolve_ticker_verbose`.
+
+    Parameters
+    ----------
+    query : str
+        Ticker or company name to resolve.
+
+    Returns
+    -------
+    str | None
+        The top-scoring symbol, or ``None`` if unresolved.
+    """
     info = resolve_ticker_verbose(query)
     return info["symbol"] if info else None

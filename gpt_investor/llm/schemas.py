@@ -83,7 +83,21 @@ class VerdictLLM(BaseModel):
 
 
 def render_verdict_markdown(v: VerdictLLM, current_price: float) -> str:
-    """Render a `VerdictLLM` into the markdown shape callers + cache already expect."""
+    """Render a `VerdictLLM` into the markdown shape callers + cache already expect.
+
+    Parameters
+    ----------
+    v : VerdictLLM
+        Validated verdict from sonnet.
+    current_price : float
+        Latest price, shown alongside the price target.
+
+    Returns
+    -------
+    str
+        Markdown block with verdict, target, thesis, positives, risks, and the
+        per-input audit lines.
+    """
     pt = f"${v.price_target:.2f}" if v.price_target is not None else "n/a"
     positives = "\n".join(f"- {p}" for p in v.positives)
     risks = "\n".join(f"- {r}" for r in v.risks)

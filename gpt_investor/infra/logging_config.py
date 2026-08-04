@@ -17,14 +17,39 @@ _initialized = False
 
 
 def _render_extra(extra: dict) -> str:
-    """Render bind() context as `key=value key=value` (no braces — loguru would
-    re-interpret them as format placeholders and raise KeyError)."""
+    """Render bind() context as `key=value key=value`.
+
+    No braces — loguru would re-interpret them as format placeholders and
+    raise KeyError.
+
+    Parameters
+    ----------
+    extra : dict
+        The record's bound context.
+
+    Returns
+    -------
+    str
+        Space-prefixed key=value pairs, or empty string when no context.
+    """
     if not extra:
         return ""
     return " " + " ".join(f"{k}={v}" for k, v in extra.items())
 
 
 def _console_format(record) -> str:
+    """Build the colored console format string for a log record.
+
+    Parameters
+    ----------
+    record : loguru.Record
+        The record being formatted.
+
+    Returns
+    -------
+    str
+        Loguru format template with the record's extra context inlined.
+    """
     extra_part = _render_extra(record["extra"])
     if extra_part:
         extra_part = f" <yellow>{extra_part.strip()}</yellow>"
@@ -38,6 +63,18 @@ def _console_format(record) -> str:
 
 
 def _file_format(record) -> str:
+    """Build the plain file format string for a log record.
+
+    Parameters
+    ----------
+    record : loguru.Record
+        The record being formatted.
+
+    Returns
+    -------
+    str
+        Loguru format template with the record's extra context inlined.
+    """
     return (
         "{time:HH:mm:ss.SSS} {level: <7} [{name}:{function}:{line}]"
         + _render_extra(record["extra"])
@@ -49,6 +86,17 @@ def setup_logging(
     level: str | None = None,
     log_file: str | os.PathLike = "logs/claude-investor.log",
 ) -> None:
+    """Configure loguru sinks once per process (console + rotating file).
+
+    Idempotent — repeat calls after the first are no-ops.
+
+    Parameters
+    ----------
+    level : str, optional
+        Console log level; defaults to `GPT_INVESTOR_LOG_LEVEL` env or INFO.
+    log_file : str | os.PathLike, optional
+        Path to the DEBUG file sink; default "logs/claude-investor.log".
+    """
     global _initialized
     if _initialized:
         return
