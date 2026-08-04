@@ -399,25 +399,22 @@ def _screen_universe() -> tuple[dict[str, dict], list[str]]:
 
 
 def _prefilter_by_dollar_volume(quotes_by_sym: dict[str, dict], trending: list[str], top: int) -> list[str]:
-    """Rank the universe by dollar-volume, forcing trending equities in.
-
-    Trending symbols are prepended even without a screen quote to rank on, so
-    they widen coverage. Bounds the downstream fundamentals cost.
+    """Pick the `top` most-liquid symbols: trending ones first, then the rest by
+    dollar-volume. Caps how many names get the (costly) fundamentals scoring.
 
     Parameters
     ----------
     quotes_by_sym : dict[str, dict]
-        Symbol to screen quote.
+        Symbol → screen quote.
     trending : list[str]
-        Trending symbols to force-include, in order.
+        Symbols to always include, in order.
     top : int
-        Cap on the returned list length.
+        Max symbols to return.
 
     Returns
     -------
     list[str]
-        Up to `top` symbols: trending first, then remaining by descending
-        dollar-volume.
+        Up to `top` symbols.
     """
     ranked = sorted(quotes_by_sym.values(), key=_dollar_volume, reverse=True)
     out: list[str] = []
@@ -499,6 +496,17 @@ def _setup_score(fund: dict, wyckoff: dict, regime_label: str | None) -> float:
 def _why_chip(fund: dict, wyckoff: dict, regime_label: str | None) -> str:
     """Build the short "why" label shown on a setup card.
 
+    The regime tag says whether the macro backdrop *helps* this name's Wyckoff
+    phase: `+regime` (tailwind), `-regime` (headwind), `~regime` (neutral),
+    derived from `_regime_fit`.
+
+    `regime_label` is one of the market-regime classifications:
+        risk-on-bull       — calm vol, healthy curve, credit rising: broad tailwind
+        panic-opportunity  — extreme fear during inversion: washout / dip-buy setup
+        late-cycle-caution — flat/inverted curve + elevated vol: cycle maturing
+        recession-warning  — inversion + vol + credit weakening: broad headwind
+        mixed              — no clear signal
+
     Parameters
     ----------
     fund : dict
@@ -506,12 +514,12 @@ def _why_chip(fund: dict, wyckoff: dict, regime_label: str | None) -> str:
     wyckoff : dict
         Wyckoff result with a `phase` key.
     regime_label : str | None
-        Macro-regime label used to derive the regime tag.
+        Macro-regime label (see above) used to derive the regime tag.
 
     Returns
     -------
     str
-        `"<tier> • <phase> • <±/~regime>"`.
+        `"<tier> • <phase> • <+/-/~regime>"`, e.g. `"Strong • markup • +regime"`.
     """
     fit = _regime_fit(fund.get("tier", ""), wyckoff.get("phase", ""), regime_label)
     regime_tag = "+regime" if fit > 0 else "-regime" if fit < 0 else "~regime"
