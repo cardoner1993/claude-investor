@@ -36,10 +36,28 @@ def explain_verdict(
     macro_block: str,
     verdict_md: str,
 ) -> str:
-    """Return a plain-English explanation of the verdict, or "" on failure.
+    """Synthesise a plain-English explanation of the verdict.
 
-    All arguments are the rendered markdown blocks already shown in the UI —
-    the explainer reads them, it never recomputes them.
+    Synthesis only: reads the rendered markdown blocks already shown in the UI,
+    never recomputes them and introduces no new facts. Returns "" on failure.
+
+    Parameters
+    ----------
+    fund_block : str
+        Rendered fundamentals block; may be empty.
+    sentiment_block : str
+        Rendered news-sentiment block; may be empty.
+    wyckoff_block : str
+        Rendered price/volume timing (Wyckoff) block; may be empty.
+    macro_block : str
+        Rendered macro/liquidity block; may be empty.
+    verdict_md : str
+        Rendered final verdict markdown. Empty short-circuits to "".
+
+    Returns
+    -------
+    str
+        Plain-English walkthrough of why the verdict landed, or "" on failure.
     """
     if not verdict_md:
         return ""

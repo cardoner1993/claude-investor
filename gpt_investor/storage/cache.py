@@ -165,6 +165,20 @@ def save_cached_liquidity(text: str) -> None:
 
 
 def get_cached_explainer(ticker: str, prompt_version: str) -> str | None:
+    """Fetch today's cached explainer text for a ticker.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+    prompt_version : str
+        Explainer prompt version; a bump misses the cache and forces recompute.
+
+    Returns
+    -------
+    str | None
+        Cached explanation text, or None if absent for today.
+    """
     today = date.today().isoformat()
     with _conn() as conn:
         row = conn.execute(
@@ -175,6 +189,23 @@ def get_cached_explainer(ticker: str, prompt_version: str) -> str | None:
 
 
 def save_cached_explainer(ticker: str, prompt_version: str, text: str) -> None:
+    """Store explainer text for a ticker under today's date.
+
+    No-op when text is empty or whitespace-only.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+    prompt_version : str
+        Explainer prompt version the text was generated under.
+    text : str
+        Explanation text to cache.
+
+    Returns
+    -------
+    None
+    """
     if not (text and text.strip()):
         return
     today = date.today().isoformat()

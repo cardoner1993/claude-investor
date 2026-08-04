@@ -391,6 +391,12 @@ class State(rx.State):
 
     @rx.event(background=True)
     async def generate_explainer(self):
+        """Generate (or load cached) the plain-English explainer for the open ticker.
+
+        Background event. Reads self.selected_ticker plus its rendered layer
+        blocks, then writes self.explainer_html / self.selected_explainer_html /
+        self.explainer_loading. No-op if no ticker is open or one is already cached.
+        """
         async with self:
             ticker = self.selected_ticker
             if not ticker or self.explainer_html.get(ticker):
