@@ -20,7 +20,24 @@ _EPS = 1e-9
 
 
 def normalize_probs(up, flat, down) -> dict:
-    """Clamp negatives, renormalise to sum 1. Degenerate (all-zero) → uniform."""
+    """Clamp negatives and renormalise to sum 1.
+
+    A degenerate all-zero input falls back to a uniform distribution.
+
+    Parameters
+    ----------
+    up : float
+        Raw probability weight for the up class.
+    flat : float
+        Raw probability weight for the flat class.
+    down : float
+        Raw probability weight for the down class.
+
+    Returns
+    -------
+    dict
+        Keys ``up``/``flat``/``down`` with non-negative floats summing to 1.
+    """
     vals = [max(0.0, float(x or 0.0)) for x in (up, flat, down)]
     total = sum(vals)
     if total <= 0:
@@ -29,8 +46,23 @@ def normalize_probs(up, flat, down) -> dict:
 
 
 def brier_score(probs: dict, realized: str) -> float | None:
-    """Multiclass Brier score: mean squared error of the probability vector vs
-    the one-hot realised class. Lower is better (0 = perfect, 2 = worst)."""
+    """Multiclass Brier score of the probability vector vs the realised class.
+
+    Squared error against the one-hot realised class; lower is better
+    (0 = perfect, 2 = worst).
+
+    Parameters
+    ----------
+    probs : dict
+        Probability distribution with ``up``/``flat``/``down`` weights.
+    realized : str
+        The realised class; one of ``up``/``flat``/``down``.
+
+    Returns
+    -------
+    float | None
+        Rounded Brier score, or None if `realized` is not a valid class.
+    """
     if realized not in _CLASSES:
         return None
     p = normalize_probs(probs.get("up"), probs.get("flat"), probs.get("down"))
@@ -38,7 +70,23 @@ def brier_score(probs: dict, realized: str) -> float | None:
 
 
 def log_loss(probs: dict, realized: str) -> float | None:
-    """Negative log-likelihood of the realised class. Lower is better."""
+    """Negative log-likelihood of the realised class.
+
+    Lower is better. The realised probability is clamped to `_EPS` to avoid a
+    log of zero blowing up.
+
+    Parameters
+    ----------
+    probs : dict
+        Probability distribution with ``up``/``flat``/``down`` weights.
+    realized : str
+        The realised class; one of ``up``/``flat``/``down``.
+
+    Returns
+    -------
+    float | None
+        Rounded log loss, or None if `realized` is not a valid class.
+    """
     if realized not in _CLASSES:
         return None
     p = normalize_probs(probs.get("up"), probs.get("flat"), probs.get("down"))
@@ -46,7 +94,22 @@ def log_loss(probs: dict, realized: str) -> float | None:
 
 
 def realized_class(ret: float | None, flat_band: float = 0.02) -> str | None:
-    """Bucket a forward return into up/flat/down (±`flat_band` = flat)."""
+    """Bucket a forward return into up/flat/down.
+
+    Returns within ±`flat_band` count as flat.
+
+    Parameters
+    ----------
+    ret : float | None
+        Forward return as a fraction (e.g. 0.03 for +3%).
+    flat_band : float, optional
+        Symmetric dead-band around zero; default 0.02.
+
+    Returns
+    -------
+    str | None
+        ``up``/``flat``/``down``, or None if `ret` is None.
+    """
     if ret is None:
         return None
     if ret > flat_band:
@@ -59,9 +122,24 @@ def realized_class(ret: float | None, flat_band: float = 0.02) -> str | None:
 def kelly_fraction(prob_up: float, prob_down: float, payoff: float, fraction: float = _KELLY_FRACTION) -> float:
     """Fractional-Kelly stake for a win/loss bet.
 
-    `payoff` = net odds (win $payoff per $1 risked). Full Kelly f* = (p·b − q)/b;
-    scaled by `fraction` and clamped to [0, _MAX_SIZE]. Returns 0 for a
-    negative-edge bet (don't size into it).
+    Full Kelly f* = (p·b − q)/b, scaled by `fraction` (½-Kelly by default) and
+    clamped to [0, _MAX_SIZE]. Negative-edge bets return 0.
+
+    Parameters
+    ----------
+    prob_up : float
+        Win probability.
+    prob_down : float
+        Loss probability.
+    payoff : float
+        Net odds — win $payoff per $1 risked.
+    fraction : float, optional
+        Kelly scaling factor; default ½-Kelly (`_KELLY_FRACTION`).
+
+    Returns
+    -------
+    float
+        Rounded stake fraction in [0, _MAX_SIZE].
     """
     if payoff <= 0:
         return 0.0
@@ -73,6 +151,20 @@ def payoff_from_target(current_price, price_target, downside: float = 0.15) -> f
     """Net odds implied by the price target: upside% / assumed downside%.
 
     Falls back to even odds (1.0) when no target or non-positive upside.
+
+    Parameters
+    ----------
+    current_price : float
+        Current price of the asset.
+    price_target : float
+        Analyst/model price target.
+    downside : float, optional
+        Assumed downside fraction if the bet loses; default 0.15.
+
+    Returns
+    -------
+    float
+        Rounded net odds, or 1.0 on missing inputs / non-positive upside.
     """
     if not current_price or current_price <= 0 or not price_target or downside <= 0:
         return 1.0
@@ -83,7 +175,20 @@ def payoff_from_target(current_price, price_target, downside: float = 0.15) -> f
 
 
 def position_advice(kelly: float, held: bool) -> str:
-    """Hold-aware suggestion from the Kelly stake."""
+    """Hold-aware trim/add/skip suggestion from the Kelly stake.
+
+    Parameters
+    ----------
+    kelly : float
+        Fractional-Kelly stake.
+    held : bool
+        Whether the position is already held.
+
+    Returns
+    -------
+    str
+        Action suggestion (e.g. ``skip``, ``add``, ``full position``).
+    """
     if kelly <= 0:
         return "trim / exit" if held else "skip"
     if held:
@@ -92,8 +197,33 @@ def position_advice(kelly: float, held: bool) -> str:
 
 
 def render_probability_block(prob_up, prob_flat, prob_down, premortem, current_price, price_target, held: bool = False) -> str:
-    """Markdown addendum appended to the verdict: distribution, pre-mortem,
-    fractional-Kelly size + trim/add/skip suggestion."""
+    """Build the markdown addendum appended to the verdict.
+
+    Renders the probability distribution, fractional-Kelly size + hold-aware
+    suggestion, and an optional pre-mortem note.
+
+    Parameters
+    ----------
+    prob_up : float
+        Raw up-class probability weight.
+    prob_flat : float
+        Raw flat-class probability weight.
+    prob_down : float
+        Raw down-class probability weight.
+    premortem : str | None
+        Optional pre-mortem note; omitted from output when falsy.
+    current_price : float
+        Current price of the asset.
+    price_target : float
+        Analyst/model price target.
+    held : bool, optional
+        Whether the position is already held; default False.
+
+    Returns
+    -------
+    str
+        Markdown block, sections joined by blank lines.
+    """
     p = normalize_probs(prob_up, prob_flat, prob_down)
     payoff = payoff_from_target(current_price, price_target)
     kelly = kelly_fraction(p["up"], p["down"], payoff)
