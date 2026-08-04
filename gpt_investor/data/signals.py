@@ -34,6 +34,20 @@ _peer_lock = threading.Lock()
 
 
 def _safe_float(x) -> float | None:
+    """Coerce a value to a finite float, or None.
+
+    None when the value can't be parsed or is NaN/inf.
+
+    Parameters
+    ----------
+    x : object
+        Value to coerce.
+
+    Returns
+    -------
+    float | None
+        Finite float, or None on failure.
+    """
     try:
         v = float(x)
         return v if not (math.isnan(v) or math.isinf(v)) else None
@@ -44,7 +58,19 @@ def _safe_float(x) -> float | None:
 # --- B1 short interest -----------------------------------------------------
 
 def score_short_interest(short_pct: float | None) -> dict:
-    """`short_pct` is a fraction (0.18 = 18% of float). Flags crowded shorts."""
+    """Score short interest and flag crowded shorts.
+
+    Parameters
+    ----------
+    short_pct : float | None
+        Fraction of float sold short (0.18 = 18%).
+
+    Returns
+    -------
+    dict
+        `{short_pct: float | None, crowded: bool}` — crowded True when above the
+        15% threshold.
+    """
     pct = _safe_float(short_pct)
     return {"short_pct": pct, "crowded": pct is not None and pct > _HIGH_SHORT}
 
@@ -52,7 +78,20 @@ def score_short_interest(short_pct: float | None) -> dict:
 # --- B2 earnings calendar --------------------------------------------------
 
 def days_to_earnings(earnings_dates: list, as_of: date) -> int | None:
-    """Smallest non-negative day-count to a future earnings date, or None."""
+    """Smallest non-negative day-count to a future earnings date, or None.
+
+    Parameters
+    ----------
+    earnings_dates : list
+        Candidate earnings dates; non-`date` items are ignored.
+    as_of : date
+        Reference date to count from.
+
+    Returns
+    -------
+    int | None
+        Days to the nearest future earnings date, or None if none are future.
+    """
     future = []
     for d in earnings_dates or []:
         if isinstance(d, date):
@@ -63,6 +102,18 @@ def days_to_earnings(earnings_dates: list, as_of: date) -> int | None:
 
 
 def earnings_banner(days: int | None) -> str:
+    """Banner text when earnings are imminent, else empty.
+
+    Parameters
+    ----------
+    days : int | None
+        Days to next earnings.
+
+    Returns
+    -------
+    str
+        "EARNINGS TODAY" / "EARNINGS IN Nd" within the 7-day window, else "".
+    """
     if days is None or days > _EARNINGS_SOON:
         return ""
     return "EARNINGS TODAY" if days == 0 else f"EARNINGS IN {days}D"
@@ -75,6 +126,18 @@ _SELL_WORDS = ("sale", "sell", "disposition")
 
 
 def _txn_sign(transaction: str) -> int:
+    """Sign of an insider transaction from its description.
+
+    Parameters
+    ----------
+    transaction : str
+        Transaction label (e.g. "Purchase", "Sale").
+
+    Returns
+    -------
+    int
+        +1 for a buy, -1 for a sell, 0 when unrecognised.
+    """
     t = (transaction or "").lower()
     if any(w in t for w in _BUY_WORDS):
         return 1
@@ -84,10 +147,24 @@ def _txn_sign(transaction: str) -> int:
 
 
 def net_insider_flow(rows: list[dict], as_of: date, window_days: int) -> float | None:
-    """Signed sum of insider transaction dollar value within `window_days`.
+    """Signed sum of insider transaction dollar value within a window.
 
-    `rows` items: `{value, date, transaction}`. Positive = net buying. Returns
-    None when no dated, signed transactions fall in the window.
+    Positive = net buying.
+
+    Parameters
+    ----------
+    rows : list[dict]
+        Transaction rows shaped `{value, date, transaction}`.
+    as_of : date
+        Window end (inclusive).
+    window_days : int
+        Look-back length in days.
+
+    Returns
+    -------
+    float | None
+        Signed dollar flow, or None when no dated, signed transactions fall in
+        the window.
     """
     total = 0.0
     seen = False
@@ -107,10 +184,22 @@ def net_insider_flow(rows: list[dict], as_of: date, window_days: int) -> float |
 # --- B4 multi-year trend ---------------------------------------------------
 
 def cagr(first: float | None, last: float | None, years: float) -> float | None:
-    """Compound annual growth from `first` to `last` over `years`.
+    """Compound annual growth rate from `first` to `last` over `years`.
 
-    None if inputs are missing, non-positive (CAGR undefined through zero), or
-    years <= 0.
+    Parameters
+    ----------
+    first : float | None
+        Starting value.
+    last : float | None
+        Ending value.
+    years : float
+        Span in years.
+
+    Returns
+    -------
+    float | None
+        CAGR rounded to 4 dp, or None if inputs are missing, non-positive (CAGR
+        undefined through zero), or years <= 0.
     """
     f, l = _safe_float(first), _safe_float(last)
     if f is None or l is None or f <= 0 or l <= 0 or years <= 0:
@@ -121,7 +210,18 @@ def cagr(first: float | None, last: float | None, years: float) -> float | None:
 def margin_slope(margins: list) -> float | None:
     """Least-squares slope of a margin series (oldest→newest), per period.
 
-    Positive = margins expanding. None if fewer than 2 clean points.
+    Positive = margins expanding.
+
+    Parameters
+    ----------
+    margins : list
+        Margin series ordered oldest→newest; None/NaN entries are dropped.
+
+    Returns
+    -------
+    float | None
+        Slope rounded to 4 dp, or None with fewer than 2 clean points or zero
+        x-variance.
     """
     ys = [_safe_float(m) for m in (margins or [])]
     ys = [y for y in ys if y is not None]
@@ -143,9 +243,21 @@ def margin_slope(margins: list) -> float | None:
 def peer_relative(own: float | None, peer_values: list) -> dict:
     """Compare a ticker's multiple to its peer median.
 
-    Returns `{median, ratio, cheaper}` — ratio = own/median (<1 = cheaper than
-    peers). Softens the P/B punishment on asset-light megacaps by judging
-    valuation against the sector, not an absolute threshold.
+    Softens P/B punishment on asset-light megacaps by judging valuation against
+    the sector rather than an absolute threshold.
+
+    Parameters
+    ----------
+    own : float | None
+        The ticker's own multiple.
+    peer_values : list
+        Peer multiples; non-positive and unparseable entries are dropped.
+
+    Returns
+    -------
+    dict
+        `{median: float | None, ratio: float | None, cheaper: bool | None}` —
+        ratio = own/median (<1 = cheaper than peers).
     """
     vals = [v for v in (_safe_float(x) for x in (peer_values or [])) if v is not None and v > 0]
     o = _safe_float(own)
@@ -160,7 +272,20 @@ def fetch_peer_medians(industry_key: str, max_peers: int = 8) -> dict:
     """Median forward P/E and EV/EBITDA across an industry's top companies.
 
     Cached 6h per industry_key (peers move slowly and many tickers share one
-    industry). Best-effort — returns Nones on failure.
+    industry). Best-effort — degrades to Nones on failure.
+
+    Parameters
+    ----------
+    industry_key : str
+        yfinance industry key.
+    max_peers : int, optional
+        Cap on peers sampled, default 8.
+
+    Returns
+    -------
+    dict
+        `{pe_median: float | None, ev_median: float | None, n: int}` where n is
+        the peer count that contributed.
     """
     if not industry_key:
         return {"pe_median": None, "ev_median": None, "n": 0}
@@ -182,6 +307,13 @@ def fetch_peer_medians(industry_key: str, max_peers: int = 8) -> dict:
     lock = threading.Lock()
 
     def _one(sym: str) -> None:
+        """Fetch one peer's positive P/E and EV/EBITDA into the shared lists.
+
+        Parameters
+        ----------
+        sym : str
+            Peer ticker symbol.
+        """
         try:
             info = yf.Ticker(sym).info
             pe = _safe_float(info.get("forwardPE") or info.get("trailingPE"))
@@ -214,11 +346,24 @@ def fetch_peer_medians(industry_key: str, max_peers: int = 8) -> dict:
 # --- orchestration + fetch -------------------------------------------------
 
 def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
-    """Pull all higher-signal legs for one ticker. Every leg is independently
-    guarded — a failure in one degrades that leg to None, never the whole dict.
+    """Pull all higher-signal legs for one ticker.
 
-    `fundamentals` is the scored dict (for the peer-relative comparison + the
-    industry key); when omitted, peer comparison is skipped.
+    Every leg is independently guarded — a failure in one degrades that leg to
+    None, never the whole dict.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+    fundamentals : dict | None, optional
+        Scored fundamentals used for the peer-relative comparison; when omitted
+        (default None), peer comparison is skipped.
+
+    Returns
+    -------
+    dict
+        `{short, earnings_days, earnings_banner, insider_30d, insider_90d,
+        rev_cagr, fcf_cagr, op_margin_slope, peers}`.
     """
     t = yf.Ticker(ticker)
     try:
@@ -299,6 +444,18 @@ def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
 
 
 def _as_date(x) -> date | None:
+    """Coerce a value or pandas Timestamp to a `date`, or None.
+
+    Parameters
+    ----------
+    x : object
+        Value to coerce; `date` passes through, Timestamp is downcast.
+
+    Returns
+    -------
+    date | None
+        A `date`, or None when the value can't be converted.
+    """
     if isinstance(x, date):
         return x
     try:
@@ -308,8 +465,23 @@ def _as_date(x) -> date | None:
 
 
 def _row(df, label: str) -> list[float] | None:
-    """Row of a yfinance statement DataFrame as newest→oldest floats with NaN
-    dropped, or None. Use for standalone series (CAGR endpoints)."""
+    """Clean row of a yfinance statement DataFrame, newest→oldest.
+
+    Use for standalone series (CAGR endpoints) where position alignment across
+    rows doesn't matter.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Statement frame indexed by line-item label.
+    label : str
+        Row label to extract.
+
+    Returns
+    -------
+    list[float] | None
+        Floats with NaN dropped, or None when the row is absent or empty.
+    """
     raw = _raw_row(df, label)
     if raw is None:
         return None
@@ -317,8 +489,23 @@ def _row(df, label: str) -> list[float] | None:
 
 
 def _raw_row(df, label: str) -> list | None:
-    """Row as newest→oldest with NaN kept as None (positions preserved). Use
-    when two rows must stay column-aligned before dropping missing cells."""
+    """Raw row, newest→oldest, with NaN kept as None (positions preserved).
+
+    Use when two rows must stay column-aligned before dropping missing cells.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Statement frame indexed by line-item label.
+    label : str
+        Row label to extract.
+
+    Returns
+    -------
+    list | None
+        Floats/None per column, or None when the row is absent or extraction
+        fails.
+    """
     try:
         if label not in df.index:
             return None
@@ -330,17 +517,53 @@ def _raw_row(df, label: str) -> list | None:
 # --- formatting ------------------------------------------------------------
 
 def _fmt_pct(v: float | None) -> str:
+    """Format a fraction as a signed percentage, or "n/a".
+
+    Parameters
+    ----------
+    v : float | None
+        Fraction to format.
+
+    Returns
+    -------
+    str
+        Signed percentage (e.g. "+12.0%"), or "n/a" when None.
+    """
     return f"{v:+.1%}" if v is not None else "n/a"
 
 
 def _fmt_flow(v: float | None) -> str:
+    """Format a dollar flow in signed millions, or "n/a".
+
+    Parameters
+    ----------
+    v : float | None
+        Dollar value to format.
+
+    Returns
+    -------
+    str
+        Signed millions (e.g. "+$3.2M"), or "n/a" when None.
+    """
     if v is None:
         return "n/a"
     return f"{'+' if v >= 0 else '-'}${abs(v) / 1e6:.1f}M"
 
 
 def format_signals(sig: dict) -> str:
-    """Markdown block for the final-analysis prompt + dialog."""
+    """Render a signals dict as a Markdown block for the prompt and dialog.
+
+    Parameters
+    ----------
+    sig : dict
+        Signals dict as returned by `fetch_signals`.
+
+    Returns
+    -------
+    str
+        Multi-line Markdown summarising short interest, earnings, insider flow,
+        multi-year trend, and peer valuation.
+    """
     short = sig.get("short", {})
     peers = sig.get("peers", {})
     lines = ["**Higher-signal data**", ""]
