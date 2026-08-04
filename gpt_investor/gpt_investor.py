@@ -24,6 +24,14 @@ from gpt_investor.state import State
 
 
 def index() -> rx.Component:
+    """Build the single-page app layout.
+
+    Returns
+    -------
+    rx.Component
+        Root box: token counter, dialog, hero, search form, and the
+        analysis section shown while analyzing or done.
+    """
     return rx.box(
         token_counter(),
         analysis_dialog(),

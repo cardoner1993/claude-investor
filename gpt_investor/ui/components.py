@@ -70,7 +70,19 @@ logger.info("startup industry groups ready: {} sectors", len(_YF_INDUSTRY_GROUPS
 
 @rx.memo
 def analysis_html_renderer(html: str) -> rx.Component:
-    """Separate memoized component so it gets its own JS file with useContext."""
+    """Render pre-rendered analysis HTML via dangerouslySetInnerHTML.
+
+    Separate memoized component so it gets its own JS file with useContext.
+
+    Parameters
+    ----------
+    html : str
+        Sanitized HTML markup to inject.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.el.div(
         special_props=[rx.Var(_js_expr="{dangerouslySetInnerHTML: {__html: htmlRxMemo}}")],
         class_name="md-analysis",
@@ -79,6 +91,17 @@ def analysis_html_renderer(html: str) -> rx.Component:
 
 @rx.memo
 def liquidity_html_renderer(html: str) -> rx.Component:
+    """Render pre-rendered liquidity HTML via dangerouslySetInnerHTML.
+
+    Parameters
+    ----------
+    html : str
+        Sanitized HTML markup to inject.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.el.div(
         special_props=[rx.Var(_js_expr="{dangerouslySetInnerHTML: {__html: htmlRxMemo}}")],
         class_name="md-analysis",
@@ -86,6 +109,12 @@ def liquidity_html_renderer(html: str) -> rx.Component:
 
 
 def token_counter() -> rx.Component:
+    """Build the fixed bottom-right token usage chip linking to Claude usage.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.el.a(
         rx.hstack(
             rx.icon("cpu", size=12, color="gray"),
@@ -116,6 +145,17 @@ def token_counter() -> rx.Component:
 
 
 def ticker_card(ticker_kv: list[str]) -> rx.Component:
+    """Build one ticker card: name, fundamental/sentiment/Wyckoff badges, status.
+
+    Parameters
+    ----------
+    ticker_kv : list[str]
+        `[ticker, status]` pair from `State.tickers`.
+
+    Returns
+    -------
+    rx.Component
+    """
     ticker = ticker_kv[0]
     status = ticker_kv[1]
     is_done = (status == "finished") | (status == "cached")
@@ -219,6 +259,12 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
 
 
 def analysis_dialog() -> rx.Component:
+    """Build the modal that shows the selected ticker's full analysis.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.dialog.root(
         rx.dialog.content(
             rx.dialog.title(
@@ -410,6 +456,12 @@ def analysis_dialog() -> rx.Component:
 
 
 def liquidity_panel() -> rx.Component:
+    """Build the global liquidity card, or a spinner while it loads.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.cond(
         State.liquidity_html != "",
         rx.card(
@@ -436,6 +488,12 @@ def liquidity_panel() -> rx.Component:
 
 
 def tickers_grid() -> rx.Component:
+    """Build the wrapping grid of ticker cards, or empty/loading fallbacks.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.cond(
         State.tickers,
         rx.flex(
@@ -453,6 +511,12 @@ def tickers_grid() -> rx.Component:
 
 
 def status_line() -> rx.Component:
+    """Build the run status line plus the Stop button while analyzing.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.hstack(
         rx.cond(
             State.all_done,
@@ -491,7 +555,17 @@ def status_line() -> rx.Component:
 
 
 def _candidate_row(cand: list[str]) -> rx.Component:
-    """One clickable row for the confirm panel: [symbol, name, exchange]."""
+    """Build one clickable candidate row for the confirm panel.
+
+    Parameters
+    ----------
+    cand : list[str]
+        `[symbol, name, exchange]` triple.
+
+    Returns
+    -------
+    rx.Component
+    """
     ticker = cand[0]
     name = cand[1]
     exchange = cand[2]
@@ -517,8 +591,15 @@ def _candidate_row(cand: list[str]) -> rx.Component:
 
 
 def confirm_resolution_panel() -> rx.Component:
-    """Shown when the user typed a company name and we resolved candidates
-    but haven't started the analysis yet. They pick one or edit the query."""
+    """Build the "Did you mean…?" candidate picker for ambiguous queries.
+
+    Shown when the user typed a company name and we resolved candidates but
+    haven't started the analysis yet. They pick one or edit the query.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.cond(
         State.stage == "confirming",
         rx.vstack(
@@ -543,6 +624,12 @@ def confirm_resolution_panel() -> rx.Component:
 
 
 def hero() -> rx.Component:
+    """Build the page header: title, tagline, disclaimer badge.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.vstack(
         rx.heading("Claude Investor", size="8", weight="bold"),
         rx.text("AI-powered investment analysis · powered by Claude Code", size="2", color="gray"),
@@ -553,6 +640,12 @@ def hero() -> rx.Component:
 
 
 def industry_groups() -> rx.Component:
+    """Build the collapsible sector accordion of clickable industry chips.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.vstack(
         *[
             rx.vstack(
@@ -612,6 +705,12 @@ def industry_groups() -> rx.Component:
 
 
 def search_form() -> rx.Component:
+    """Build the main search card: trending buttons, taxonomy, and text inputs.
+
+    Returns
+    -------
+    rx.Component
+    """
     return rx.card(
         rx.vstack(
             rx.hstack(

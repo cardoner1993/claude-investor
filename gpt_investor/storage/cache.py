@@ -19,6 +19,13 @@ LIQUIDITY_TTL_SECONDS = int(os.getenv("LIQUIDITY_TTL_SECONDS", 6 * 3600))
 
 
 def _conn() -> sqlite3.Connection:
+    """Open the SQLite DB, creating tables and running idempotent migrations.
+
+    Returns
+    -------
+    sqlite3.Connection
+        Connection with `analyses` and `liquidity` tables ensured.
+    """
     conn = sqlite3.connect(_DB, check_same_thread=False)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS analyses (
@@ -106,6 +113,21 @@ def _conn() -> sqlite3.Connection:
 
 
 def get_cached(ticker: str) -> dict | None:
+    """Return today's cached analysis for a ticker, or None on a miss.
+
+    Requires both an LLM verdict and analyst ratings to count as a hit.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    dict | None
+        Keys `sentiment` (legacy prose), `sentiment_dict` (structured),
+        `analyst_ratings`, `final_analysis`; None if no usable row exists.
+    """
     today = date.today().isoformat()
     with _conn() as conn:
         row = conn.execute(
@@ -134,7 +156,18 @@ def get_cached(ticker: str) -> dict | None:
 
 
 def _sentiment_is_clean(sentiment) -> bool:
-    """Reject NaN scores, missing dict fields, completely empty payloads."""
+    """Reject NaN scores, missing dict fields, completely empty payloads.
+
+    Parameters
+    ----------
+    sentiment : dict | str | None
+        Structured sentiment dict, legacy prose string, or None.
+
+    Returns
+    -------
+    bool
+        True if the payload is safe to persist.
+    """
     if sentiment is None:
         return False
     if isinstance(sentiment, dict):
@@ -155,12 +188,23 @@ def save_cached(
     analyst_ratings: str,
     final_analysis: str,
 ) -> None:
-    """`sentiment` may be a dict (preferred) or legacy str.
+    """Persist today's analysis for a ticker, skipping degraded rows.
 
     Refuses to write a degraded row (empty verdict, empty ratings, NaN
     sentiment score) — `get_cached` would skip it next time anyway, but a
     polluted row still consumes a `(ticker, date)` slot and makes audit
     queries noisy. Better to leave the slot empty so the next run retries.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+    sentiment : dict | str
+        Structured sentiment dict (preferred) or legacy prose string.
+    analyst_ratings : str
+        Formatted analyst ratings block.
+    final_analysis : str
+        LLM verdict text.
     """
     if not (analyst_ratings and analyst_ratings.strip()):
         logger.warning("[{}] skip cache write: empty analyst_ratings", ticker)
@@ -190,7 +234,18 @@ def save_cached(
 
 
 def get_cached_liquidity(ttl_seconds: int = LIQUIDITY_TTL_SECONDS) -> str | None:
-    """Return cached liquidity snapshot if fresher than `ttl_seconds`, else None."""
+    """Return cached liquidity snapshot if fresher than `ttl_seconds`, else None.
+
+    Parameters
+    ----------
+    ttl_seconds : int, optional
+        Freshness window in seconds; default `LIQUIDITY_TTL_SECONDS`.
+
+    Returns
+    -------
+    str | None
+        Snapshot text if fresh, else None.
+    """
     with _conn() as conn:
         row = conn.execute(
             "SELECT fetched_at, text FROM liquidity WHERE key=?", ("default",)
@@ -204,6 +259,13 @@ def get_cached_liquidity(ttl_seconds: int = LIQUIDITY_TTL_SECONDS) -> str | None
 
 
 def save_cached_liquidity(text: str) -> None:
+    """Persist the liquidity snapshot with the current timestamp.
+
+    Parameters
+    ----------
+    text : str
+        Snapshot text to cache.
+    """
     with _conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO liquidity (key, fetched_at, text) VALUES (?,?,?)",

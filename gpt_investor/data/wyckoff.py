@@ -49,6 +49,18 @@ _THIN_HISTORY = 120         # fewer daily bars than this = thin
 
 
 def _safe_float(x) -> float | None:
+    """Coerce a value to float, returning None on failure or NaN.
+
+    Parameters
+    ----------
+    x : Any
+        Value to coerce.
+
+    Returns
+    -------
+    float | None
+        Float value, or None if not coercible or NaN.
+    """
     try:
         v = float(x)
         return v if not math.isnan(v) else None
@@ -61,9 +73,20 @@ def _safe_float(x) -> float | None:
 def compute_signals(df) -> dict:
     """Derive price/volume features from a daily OHLCV DataFrame.
 
-    `df` is what `fetch_ohlcv` returns — columns Open/High/Low/Close/Volume,
-    DatetimeIndex, oldest-first. Tolerates short/empty history by returning
-    Nones; downstream `classify_phase` degrades those to `neutral`.
+    Tolerates short/empty history by returning Nones; downstream
+    `classify_phase` degrades those to `neutral`.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame | None
+        What `fetch_ohlcv` returns — columns Open/High/Low/Close/Volume,
+        DatetimeIndex, oldest-first. None/empty yields an all-None feature dict.
+
+    Returns
+    -------
+    dict
+        Feature dict: bar count, SMAs, trend, 52w distances, volume ratio/bias,
+        range width, and breakout/new-low flags.
     """
     n = 0 if df is None else len(df)
     sig: dict = {
@@ -159,6 +182,16 @@ def classify_phase(sig: dict) -> Phase:
     """Map a feature dict to a Wyckoff phase. Ordered rules, first match wins.
 
     Falls back to `neutral` when history is too thin to judge or no rule fires.
+
+    Parameters
+    ----------
+    sig : dict
+        Feature dict from `compute_signals`.
+
+    Returns
+    -------
+    Phase
+        One of accumulation / markup / distribution / markdown / neutral.
     """
     if sig.get("n_bars", 0) < 60 or sig.get("sma200") is None:
         return "neutral"
@@ -211,6 +244,18 @@ _PHASE_BASE = {
 
 
 def _tier(score: float) -> str:
+    """Map a 0-10 timing score to a tier label.
+
+    Parameters
+    ----------
+    score : float
+        Wyckoff timing score.
+
+    Returns
+    -------
+    str
+        One of Strong / Solid / Average / Weak / Avoid.
+    """
     if score >= 8.0: return "Strong"
     if score >= 6.0: return "Solid"
     if score >= 4.0: return "Average"
@@ -219,8 +264,21 @@ def _tier(score: float) -> str:
 
 
 def score_wyckoff(sig: dict, phase: Phase | None = None) -> dict:
-    """Pure scoring. `sig` is the feature dict from `compute_signals` (or a
-    test fixture). `phase` defaults to `classify_phase(sig)`.
+    """Score a phase as timing quality with confirmation adjustments.
+
+    Pure — takes the feature dict so it can be unit-tested without yfinance.
+
+    Parameters
+    ----------
+    sig : dict
+        Feature dict from `compute_signals` (or a test fixture).
+    phase : Phase | None, optional
+        Phase to score; defaults to `classify_phase(sig)`.
+
+    Returns
+    -------
+    dict
+        {phase, score (0-10), tier, signals, flags}.
     """
     if phase is None:
         phase = classify_phase(sig)
@@ -274,7 +332,22 @@ def score_wyckoff(sig: dict, phase: Phase | None = None) -> dict:
 # --- data fetch ------------------------------------------------------------
 
 def fetch_ohlcv(ticker: str, period: str = "1y", interval: str = "1d"):
-    """Single-ticker daily OHLCV. Empty DataFrame on failure / no history."""
+    """Fetch single-ticker daily OHLCV from yfinance.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+    period : str, optional
+        yfinance period string, default "1y".
+    interval : str, optional
+        yfinance interval string, default "1d".
+
+    Returns
+    -------
+    pandas.DataFrame | None
+        OHLCV frame, or None on failure / empty history.
+    """
     try:
         df = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=False)
     except Exception as e:
@@ -287,10 +360,22 @@ def fetch_ohlcv(ticker: str, period: str = "1y", interval: str = "1d"):
 
 
 def fetch_ohlcv_batch(tickers: list[str], period: str = "1y") -> dict:
-    """Multi-ticker OHLCV in one download (used by PD' discovery, which scores
-    ~60 names per refresh — a per-ticker loop would be 60 calls).
+    """Fetch multi-ticker OHLCV in one download.
 
-    Returns `{ticker: DataFrame}`; missing/failed tickers are omitted.
+    Used by PD' discovery, which scores ~60 names per refresh — a per-ticker
+    loop would be 60 calls.
+
+    Parameters
+    ----------
+    tickers : list[str]
+        Ticker symbols; deduped, order preserved.
+    period : str, optional
+        yfinance period string, default "1y".
+
+    Returns
+    -------
+    dict
+        {ticker: DataFrame}; missing/failed tickers are omitted.
     """
     tickers = [t for t in dict.fromkeys(tickers) if t]  # dedupe, keep order
     if not tickers:
@@ -319,7 +404,20 @@ def fetch_ohlcv_batch(tickers: list[str], period: str = "1y") -> dict:
 
 
 def score_ticker(ticker: str) -> dict:
-    """Convenience: fetch + compute + classify + score in one call (card path)."""
+    """Fetch, compute, classify, and score one ticker in a single call.
+
+    The card path's convenience wrapper.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    dict
+        Output of `score_wyckoff`.
+    """
     df = fetch_ohlcv(ticker)
     sig = compute_signals(df)
     return score_wyckoff(sig)
@@ -328,6 +426,18 @@ def score_ticker(ticker: str) -> dict:
 # --- formatting ------------------------------------------------------------
 
 def _fmt_pct(v: float | None) -> str:
+    """Format a fraction as a signed percentage, or "n/a" when None.
+
+    Parameters
+    ----------
+    v : float | None
+        Value as a fraction (0.15 = 15%).
+
+    Returns
+    -------
+    str
+        Signed percentage string or "n/a".
+    """
     return f"{v:+.1%}" if v is not None else "n/a"
 
 
@@ -341,7 +451,21 @@ _PHASE_BLURB = {
 
 
 def format_wyckoff(scored: dict) -> str:
-    """Markdown block for the verdict prompt + the card dialog."""
+    """Render a scored Wyckoff dict as a markdown block.
+
+    Feeds both the verdict prompt and the card dialog.
+
+    Parameters
+    ----------
+    scored : dict
+        Output of `score_wyckoff`.
+
+    Returns
+    -------
+    str
+        Multi-line markdown with the timing score, phase, trend/volume/range
+        lines, and any flags.
+    """
     sig = scored.get("signals", {})
     phase = scored["phase"]
     lines = [

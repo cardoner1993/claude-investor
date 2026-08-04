@@ -18,11 +18,23 @@ from gpt_investor.data.sentiment import (
 
 
 def get_sentiment_analysis(ticker, news) -> dict:
-    """Return a quantified sentiment dict (see gpt_investor.data.sentiment.combine_sentiment).
+    """Return a quantified sentiment dict combining LLM and VADER scores.
 
-    The LLM is asked to emit a JSON block with `score`, `drivers`, `summary`.
-    VADER scores each article independently. The two are combined, with
-    disagreement driving confidence.
+    The LLM emits a JSON block with `score`, `drivers`, `summary`; VADER scores
+    each article independently. The two are combined, with disagreement driving
+    confidence. LLM parse failure falls back to VADER only.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol the news relates to.
+    news : list
+        yfinance news items; each ``content`` supplies title, date, and body.
+
+    Returns
+    -------
+    dict
+        Combined sentiment (see ``gpt_investor.data.sentiment.combine_sentiment``).
     """
     article_parts = []
     sources = {"yf_summary": 0, "fetched": 0, "title_only": 0}
@@ -89,6 +101,22 @@ def get_sentiment_analysis(ticker, news) -> dict:
 
 
 def get_industry_analysis(ticker):
+    """Return a WebSearch-grounded analysis of the ticker's industry and sector.
+
+    Resolves industry/sector from yfinance, then runs a WebSearch-required
+    Claude call covering trends, growth, regulation, and competition.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol to look up.
+
+    Returns
+    -------
+    str
+        Analysis text, or a fixed "unavailable" message when yfinance has
+        neither industry nor sector.
+    """
     info = yf.Ticker(ticker).info
     industry = info.get("industry", "")
     sector = info.get("sector", "")
@@ -122,23 +150,39 @@ def get_final_analysis(
     wyckoff: dict | None = None,
     signals: dict | None = None,
 ):
-    """Run final Buy/Hold/Sell verdict.
+    """Run the final Buy/Hold/Sell verdict through sonnet and render it.
 
-    `fundamentals` is the dict returned by `score_fundamentals`. If not
-    passed, it is fetched + scored inline (kept for callers that haven't
-    been updated yet). Callers that need the score for the UI should
-    compute it once and pass it through.
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol under analysis.
+    current_price : float
+        Latest price, shown to the model and passed to the renderer.
+    sentiment : dict | str
+        Sentiment from ``get_sentiment_analysis``; a plain string is rendered
+        as-is for backward compat.
+    analyst_ratings : Any
+        Analyst ratings block, rendered into the user message.
+    industry_analysis : str
+        Industry context text.
+    liquidity_context : str, optional
+        Macro liquidity snapshot; omitted from the prompt when empty.
+        Default ``""``.
+    fundamentals : dict | None, optional
+        Scored dict from ``score_fundamentals``; fetched + scored inline when
+        ``None``. Default ``None``.
+    regime : dict | None, optional
+        Dict from ``market_regime.get_market_regime()``; when supplied the
+        model must address macro impact. Default ``None``.
+    wyckoff : dict | None, optional
+        Dict from ``wyckoff.score_wyckoff()`` — the deterministic price/volume
+        timing layer; the model must address it when supplied. Default ``None``.
 
-    `sentiment` is the dict returned by `get_sentiment_analysis`. Backward
-    compat: a plain string is rendered as-is.
-
-    `regime` is the dict returned by `market_regime.get_market_regime()`.
-    When supplied, it's rendered into the user message and the system
-    prompt forces sonnet to address macro impact (or declare it immaterial).
-
-    `wyckoff` is the dict returned by `wyckoff.score_wyckoff()` — the
-    deterministic price/volume timing layer. When supplied, it's rendered
-    between the micro and macro blocks and the model must address it.
+    Returns
+    -------
+    str
+        Rendered verdict markdown, or ``""`` on subprocess failure or schema
+        validation failure.
     """
     if fundamentals is None:
         fundamentals = score_fundamentals(fetch_fundamentals(ticker))
@@ -213,10 +257,20 @@ def get_final_analysis(
 
 
 def _liquidity_commentary(snapshot_md: str) -> str:
-    """One-paragraph equity implication, generated from the deterministic snapshot.
+    """Generate a one-paragraph equity implication from the rendered snapshot.
 
     The model only sees the rendered numbers — it cannot invent rates. Single
-    haiku call, no tools. Failures fall back to empty string (snapshot still ships).
+    haiku call, no tools.
+
+    Parameters
+    ----------
+    snapshot_md : str
+        Rendered liquidity snapshot markdown.
+
+    Returns
+    -------
+    str
+        One-paragraph commentary, or ``""`` on failure (snapshot still ships).
     """
     system_prompt = (
         "You are a macro analyst. Read the snapshot below and write ONE paragraph "
@@ -231,11 +285,17 @@ def _liquidity_commentary(snapshot_md: str) -> str:
 
 
 def get_liquidity_context() -> str:
-    """Deterministic snapshot from official APIs (FRED + ECB SDW + PBOC scrape),
-    optionally augmented with a 1-paragraph LLM commentary on the numbers.
+    """Build the liquidity context: deterministic snapshot plus LLM commentary.
 
-    Numbers are NEVER hallucinated — they come from the APIs. The LLM only
-    reads the rendered snapshot and writes one prose sentence on implication.
+    Snapshot comes from official APIs (FRED + ECB SDW + PBOC scrape); numbers
+    are NEVER hallucinated. The LLM only reads the rendered snapshot and adds
+    one prose sentence on implication. Complete snapshots are disk-cached;
+    partial ones are returned for this run but not cached.
+
+    Returns
+    -------
+    str
+        Rendered snapshot markdown, optionally with a macro-backdrop sentence.
     """
     snapshot = get_liquidity_snapshot()
     snapshot_md = format_liquidity(snapshot)

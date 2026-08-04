@@ -50,7 +50,20 @@ _STANCE_EPS_PP = 0.05  # 5 basis points — below this, treat as flat
 
 
 def _classify_stance(delta_pp: float | None) -> Stance:
-    """Stance from a 90-day rate delta expressed in percentage points."""
+    """Stance from a 90-day rate delta expressed in percentage points.
+
+    Moves within +/- `_STANCE_EPS_PP` (5bps) count as neutral.
+
+    Parameters
+    ----------
+    delta_pp : float or None
+        90-day rate change in percentage points; None yields "unknown".
+
+    Returns
+    -------
+    Stance
+        One of "easing", "neutral", "tightening", "unknown".
+    """
     if delta_pp is None:
         return "unknown"
     if delta_pp < -_STANCE_EPS_PP:
@@ -61,7 +74,21 @@ def _classify_stance(delta_pp: float | None) -> Stance:
 
 
 def _delta_90d(series: list[tuple[str, float]]) -> float | None:
-    """Given desc-sorted [(date_iso, value), ...], return value_latest - value(~90d back)."""
+    """Latest value minus the value from ~90 days back.
+
+    Walks a descending series and returns the delta against the first
+    observation at least 90 days older than the latest.
+
+    Parameters
+    ----------
+    series : list[tuple[str, float]]
+        Desc-sorted (date_iso, value) pairs.
+
+    Returns
+    -------
+    float or None
+        `value_latest - value(~90d back)`, or None if unavailable.
+    """
     if not series:
         return None
     latest_date_s, latest_value = series[0]
@@ -82,6 +109,22 @@ def _delta_90d(series: list[tuple[str, float]]) -> float | None:
 # --- FRED -----------------------------------------------------------------
 
 def _fetch_fred_series(series_id: str, limit: int = 180) -> list[tuple[str, float]]:
+    """Fetch a FRED observation series, newest first.
+
+    Missing `FRED_API_KEY` or any request failure yields an empty list.
+
+    Parameters
+    ----------
+    series_id : str
+        FRED series id (e.g. "DFF").
+    limit : int, optional
+        Max observations to request. Default 180.
+
+    Returns
+    -------
+    list[tuple[str, float]]
+        Desc-sorted (date_iso, value) pairs; empty on failure.
+    """
     api_key = os.getenv("FRED_API_KEY", "")
     if not api_key:
         logger.warning("FRED_API_KEY not set; skipping {}", series_id)
@@ -115,7 +158,15 @@ def _fetch_fred_series(series_id: str, limit: int = 180) -> list[tuple[str, floa
 
 
 def get_fed_rate() -> dict:
-    """Daily Effective Federal Funds Rate (FRED `DFF`)."""
+    """Daily Effective Federal Funds Rate (FRED `DFF`).
+
+    Returns
+    -------
+    dict
+        Leg dict with keys `bank`, `region`, `rate_pct`, `rate_label`,
+        `delta_90d_pp`, `stance`, `as_of`, `source_url`. `rate_pct` is None
+        when the FRED key is missing or the fetch failed.
+    """
     series = _fetch_fred_series("DFF", limit=180)
     value = series[0][1] if series else None
     delta = _delta_90d(series)
@@ -134,6 +185,20 @@ def get_fed_rate() -> dict:
 # --- ECB ------------------------------------------------------------------
 
 def _fetch_ecb_csv(series_key: str) -> list[tuple[str, float]]:
+    """Fetch an ECB SDW series as CSV, newest first.
+
+    Any request failure yields an empty list.
+
+    Parameters
+    ----------
+    series_key : str
+        ECB series key (e.g. the MRO fixed-rate key).
+
+    Returns
+    -------
+    list[tuple[str, float]]
+        Desc-sorted (TIME_PERIOD, OBS_VALUE) pairs; empty on failure.
+    """
     url = f"{ECB_BASE}/{series_key}?lastNObservations=180&format=csvdata"
     try:
         r = requests.get(url, headers={"Accept": "text/csv"}, timeout=10)
@@ -153,7 +218,15 @@ def _fetch_ecb_csv(series_key: str) -> list[tuple[str, float]]:
 
 
 def get_ecb_rate() -> dict:
-    """ECB Main Refinancing Operations fixed rate."""
+    """ECB Main Refinancing Operations fixed rate.
+
+    Returns
+    -------
+    dict
+        Leg dict with keys `bank`, `region`, `rate_pct`, `rate_label`,
+        `delta_90d_pp`, `stance`, `as_of`, `source_url`. `rate_pct` is None
+        when the fetch failed.
+    """
     series = _fetch_ecb_csv(ECB_MRO_KEY)
     value = series[0][1] if series else None
     delta = _delta_90d(series)
@@ -172,8 +245,14 @@ def get_ecb_rate() -> dict:
 # --- PBOC -----------------------------------------------------------------
 
 def _fetch_pboc_lpr_series() -> list[tuple[str, float]]:
-    """Fetch ChinaMoney's English LPR history JSON. Returns desc-sorted
-    [(YYYY-MM-DD, 1Y rate), ...]. Empty list on failure.
+    """Fetch ChinaMoney's English 1Y LPR history JSON, newest first.
+
+    Any request failure yields an empty list.
+
+    Returns
+    -------
+    list[tuple[str, float]]
+        Desc-sorted (YYYY-MM-DD, 1Y rate) pairs; empty on failure.
     """
     try:
         r = requests.get(
@@ -206,7 +285,15 @@ def _fetch_pboc_lpr_series() -> list[tuple[str, float]]:
 
 
 def get_pboc_rate() -> dict:
-    """PBOC 1-year Loan Prime Rate (LPR) from ChinaMoney's English JSON API."""
+    """PBOC 1-year Loan Prime Rate (LPR) from ChinaMoney's English JSON API.
+
+    Returns
+    -------
+    dict
+        Leg dict with keys `bank`, `region`, `rate_pct`, `rate_label`,
+        `delta_90d_pp`, `stance`, `as_of`, `source_url`. `rate_pct` is None
+        when the fetch failed.
+    """
     series = _fetch_pboc_lpr_series()
     value = series[0][1] if series else None
     delta = _delta_90d(series)
@@ -230,6 +317,16 @@ def snapshot_is_complete(snapshot: dict) -> bool:
     Callers should refuse to disk-cache an incomplete snapshot — otherwise a
     transient outage (missing FRED key, ChinaMoney 5xx, ECB SDW down) freezes
     a bad value into the 6h cache.
+
+    Parameters
+    ----------
+    snapshot : dict
+        Output of `get_liquidity_snapshot()`.
+
+    Returns
+    -------
+    bool
+        True when `banks` is non-empty and every leg has a finite `rate_pct`.
     """
     banks = snapshot.get("banks", [])
     if not banks:
@@ -248,7 +345,15 @@ def snapshot_is_complete(snapshot: dict) -> bool:
 
 
 def get_liquidity_snapshot() -> dict:
-    """Combine all three legs. Any leg may be partial (rate_pct=None)."""
+    """Combine Fed, ECB and PBOC legs into one snapshot.
+
+    Any leg may be partial (`rate_pct=None`) without failing the others.
+
+    Returns
+    -------
+    dict
+        Keys `as_of` (ISO date str) and `banks` (list of the three leg dicts).
+    """
     fed = get_fed_rate()
     ecb = get_ecb_rate()
     pboc = get_pboc_rate()
@@ -266,13 +371,38 @@ def get_liquidity_snapshot() -> dict:
 
 
 def _delta_str(delta: float | None) -> str:
+    """Format a 90-day delta as a parenthetical suffix.
+
+    Parameters
+    ----------
+    delta : float or None
+        90-day change in percentage points; None yields "".
+
+    Returns
+    -------
+    str
+        e.g. " (+0.25pp 90d)", or "" when delta is None.
+    """
     if delta is None:
         return ""
     return f" ({delta:+.2f}pp 90d)"
 
 
 def format_liquidity(snapshot: dict) -> str:
-    """Markdown block, same shape callers already expect from the old LLM output."""
+    """Render a snapshot as a markdown block.
+
+    Same shape callers already expect from the old LLM-paraphrased output.
+
+    Parameters
+    ----------
+    snapshot : dict
+        Output of `get_liquidity_snapshot()`.
+
+    Returns
+    -------
+    str
+        Newline-joined markdown lines, one per bank leg.
+    """
     lines = ["**Global Liquidity Snapshot**", ""]
     for leg in snapshot.get("banks", []):
         bank = leg.get("bank", "?")

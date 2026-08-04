@@ -28,7 +28,17 @@ _vader = SentimentIntensityAnalyzer()
 def score_articles_with_vader(articles: list[dict]) -> tuple[float, int]:
     """Mean VADER compound score across articles' (title + summary).
 
-    Returns (mean_score in -1..+1, n_scored_articles).
+    Parameters
+    ----------
+    articles : list[dict]
+        yfinance news items; each may carry a `content` block with
+        `title` and `summary`.
+
+    Returns
+    -------
+    tuple[float, int]
+        (mean compound score in -1..+1 rounded to 3dp, count of scored
+        articles). Empty input yields (0.0, 0).
     """
     scores: list[float] = []
     for a in articles:
@@ -46,6 +56,22 @@ def score_articles_with_vader(articles: list[dict]) -> tuple[float, int]:
 
 
 def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
+    """Clamp a value into a closed range.
+
+    Parameters
+    ----------
+    x : float
+        Value to clamp.
+    lo : float, optional
+        Lower bound. Default -1.0.
+    hi : float, optional
+        Upper bound. Default 1.0.
+
+    Returns
+    -------
+    float
+        `x` bounded to [lo, hi].
+    """
     return max(lo, min(hi, x))
 
 
@@ -54,7 +80,27 @@ def combine_sentiment(
     n_articles: int,
     llm_data: dict | None,
 ) -> dict:
-    """Merge VADER baseline and LLM emission into the canonical sentiment dict."""
+    """Merge VADER baseline and LLM emission into the canonical sentiment dict.
+
+    Final score is a 0.4/0.6 VADER/LLM blend; disagreement plus article
+    count drive the confidence tier. A missing LLM score falls back to
+    VADER only at low confidence.
+
+    Parameters
+    ----------
+    vader_score : float
+        Mean VADER compound score in -1..+1.
+    n_articles : int
+        Number of articles VADER scored.
+    llm_data : dict or None
+        LLM emission with optional `score`, `drivers`, `summary`.
+
+    Returns
+    -------
+    dict
+        Keys `score`, `confidence`, `drivers`, `summary`, and `components`
+        (vader_score, llm_score, n_articles, disagreement).
+    """
     if llm_data is None:
         llm_data = {}
     raw_llm_score = llm_data.get("score")
@@ -106,13 +152,41 @@ def combine_sentiment(
 # --- formatting helpers ----------------------------------------------------
 
 def chip_label(score: float, confidence: str) -> str:
-    """Compact card-chip label, e.g. '+0.42 high' or '-0.15 low'."""
+    """Compact card-chip label, e.g. '+0.42 high' or '-0.15 low'.
+
+    Parameters
+    ----------
+    score : float
+        Sentiment score in -1..+1.
+    confidence : str
+        Confidence tier ("low"/"med"/"high").
+
+    Returns
+    -------
+    str
+        Signed score with confidence suffix.
+    """
     sign = "+" if score >= 0 else ""
     return f"{sign}{score:.2f} {confidence}"
 
 
 def chip_color(score: float, confidence: str) -> str:
-    """Radix color_scheme for the chip."""
+    """Radix color_scheme for the chip.
+
+    Low confidence is always gray; otherwise green/red past +/-0.2, else amber.
+
+    Parameters
+    ----------
+    score : float
+        Sentiment score in -1..+1.
+    confidence : str
+        Confidence tier ("low"/"med"/"high").
+
+    Returns
+    -------
+    str
+        Radix color scheme name.
+    """
     if confidence == "low":
         return "gray"
     if score >= 0.2:
@@ -123,7 +197,18 @@ def chip_color(score: float, confidence: str) -> str:
 
 
 def format_for_llm(sentiment: dict) -> str:
-    """Render the sentiment dict as a markdown block for downstream LLM prompts."""
+    """Render the sentiment dict as a markdown block for downstream LLM prompts.
+
+    Parameters
+    ----------
+    sentiment : dict
+        Output of `combine_sentiment()`.
+
+    Returns
+    -------
+    str
+        Newline-joined markdown: header line plus optional summary and drivers.
+    """
     s = sentiment
     lines = [
         f"**Sentiment**: score {s['score']:+.2f} ({s['confidence']} confidence) "

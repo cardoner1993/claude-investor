@@ -19,6 +19,19 @@ _total_cache_read_tokens: int = 0
 
 
 def add_token_usage(input_tokens: int, output_tokens: int, cache_read_tokens: int) -> None:
+    """Add a call's token counts to the process-wide running totals.
+
+    Thread-safe: guarded by the module lock so parallel ticker calls don't race.
+
+    Parameters
+    ----------
+    input_tokens : int
+        Prompt tokens billed for the call.
+    output_tokens : int
+        Completion tokens billed for the call.
+    cache_read_tokens : int
+        Tokens served from the prompt cache.
+    """
     global _total_input_tokens, _total_output_tokens, _total_cache_read_tokens
     with _lock:
         _total_input_tokens += input_tokens
@@ -27,6 +40,13 @@ def add_token_usage(input_tokens: int, output_tokens: int, cache_read_tokens: in
 
 
 def get_token_totals() -> dict:
+    """Return the cumulative token counts for this process.
+
+    Returns
+    -------
+    dict
+        Keys ``input``, ``output``, ``cache_read`` with their running totals.
+    """
     with _lock:
         return {
             "input": _total_input_tokens,
@@ -36,6 +56,28 @@ def get_token_totals() -> dict:
 
 
 def _parse_stream_json(stdout: str) -> dict:
+    """Parse the CLI's stream-json NDJSON into text, tool calls, URLs, usage.
+
+    Notes
+    -----
+    ``stream-json`` requires the CLI's ``--verbose`` flag or it errors out.
+    ``tool_use_result.results`` is heterogeneous: dict entries carry a
+    ``content`` list of ``{title, url}``, but a trailing entry is the model's
+    prose summary as a bare string — hence the ``isinstance(r, dict)`` and
+    ``isinstance(c, dict)`` guards before ``.get()``.
+
+    Parameters
+    ----------
+    stdout : str
+        Raw stdout from the ``claude`` subprocess, one JSON event per line.
+
+    Returns
+    -------
+    dict
+        Keys ``text`` (final result string), ``tool_calls`` (list of
+        ``{name, input}``), ``urls`` (search-result URLs), ``model_usage``
+        (per-model token usage dict).
+    """
     text = ""
     tool_calls: list[dict] = []
     urls: list[str] = []
@@ -88,6 +130,35 @@ def call_claude(
     require_tools: list[str] | None = None,
     max_retries: int = 1,
 ) -> str:
+    """Invoke the Claude CLI via subprocess and return the final text.
+
+    Billing goes through the user's Claude Code subscription, not the SDK.
+    When ``require_tools`` is set and the model answered without calling any of
+    them, retries up to ``max_retries`` times with a stricter system prompt.
+    A 180s timeout or non-zero exit yields empty text rather than raising.
+
+    Parameters
+    ----------
+    system_prompt : str
+        System prompt passed via ``--system-prompt``.
+    user_message : str
+        User prompt passed via ``-p``.
+    model : str, optional
+        CLI model alias, default ``"haiku"``.
+    tools : bool, optional
+        Allow WebSearch/WebFetch, default ``True``.
+    require_tools : list[str] | None, optional
+        Tool names that must be invoked; triggers stricter-prompt retries if
+        absent. Default ``None``.
+    max_retries : int, optional
+        Max stricter-prompt retries when ``require_tools`` is unsatisfied,
+        default ``1``.
+
+    Returns
+    -------
+    str
+        Final response text, or ``""`` on timeout / failure.
+    """
     global _total_input_tokens, _total_output_tokens, _total_cache_read_tokens
 
     base_cmd = [
@@ -185,6 +256,17 @@ def _extract_json_blob(text: str) -> str:
 
     Prefers fenced ```json blocks, falls back to the first {...} or [...]
     region, finally returns the whole string for json_repair to attempt.
+
+    Parameters
+    ----------
+    text : str
+        Raw model response, possibly wrapped in prose or code fences.
+
+    Returns
+    -------
+    str
+        The extracted JSON substring, or the trimmed original when no
+        delimiters are found.
     """
     if not text:
         return ""
@@ -217,7 +299,30 @@ def call_claude_structured(
     Appends the schema's JSON Schema to the system prompt so the model knows
     the shape expected. On parse/validation failure, retries up to
     `max_schema_retries` times with the validator error fed back in.
-    Returns `None` if every attempt fails — caller decides the fallback.
+
+    Parameters
+    ----------
+    schema : type[T]
+        Pydantic model class to validate the response against.
+    system_prompt : str
+        System prompt; the JSON Schema is appended to it.
+    user_message : str
+        User prompt.
+    model : str, optional
+        CLI model alias, default ``"haiku"``.
+    tools : bool, optional
+        Allow WebSearch/WebFetch, default ``False``.
+    require_tools : list[str] | None, optional
+        Tool names that must be invoked, forwarded to ``call_claude``.
+        Default ``None``.
+    max_schema_retries : int, optional
+        Max re-prompts on parse/validation failure, default ``1``.
+
+    Returns
+    -------
+    T | None
+        Validated model instance, or ``None`` if every attempt fails — the
+        caller decides the fallback.
     """
     schema_json = json.dumps(schema.model_json_schema(), indent=2)
     base_sys = (

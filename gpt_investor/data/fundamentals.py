@@ -27,6 +27,18 @@ from gpt_investor.infra.resilience import resilient
 # --- per-dimension scoring helpers -----------------------------------------
 
 def _score_pe(pe: float | None) -> float:
+    """Score a P/E ratio on a 0-10 scale, cheaper is higher.
+
+    Parameters
+    ----------
+    pe : float | None
+        Forward or trailing P/E. None or non-positive scores 0.
+
+    Returns
+    -------
+    float
+        0-10 score.
+    """
     if pe is None or pe <= 0:
         return 0.0
     if pe < 12: return 10.0
@@ -38,6 +50,18 @@ def _score_pe(pe: float | None) -> float:
 
 
 def _score_pb(pb: float | None) -> float:
+    """Score a price-to-book ratio on a 0-10 scale, lower is higher.
+
+    Parameters
+    ----------
+    pb : float | None
+        Price-to-book. None or non-positive scores neutral (5.0).
+
+    Returns
+    -------
+    float
+        0-10 score.
+    """
     if pb is None or pb <= 0:
         return 5.0  # neutral when missing
     if pb < 1.5: return 10.0
@@ -48,6 +72,18 @@ def _score_pb(pb: float | None) -> float:
 
 
 def _score_ev_ebitda(ev: float | None) -> float:
+    """Score an EV/EBITDA multiple on a 0-10 scale, lower is higher.
+
+    Parameters
+    ----------
+    ev : float | None
+        Enterprise-value-to-EBITDA. None or non-positive scores neutral (5.0).
+
+    Returns
+    -------
+    float
+        0-10 score.
+    """
     if ev is None or ev <= 0:
         return 5.0
     if ev < 8:  return 10.0
@@ -58,6 +94,19 @@ def _score_ev_ebitda(ev: float | None) -> float:
 
 
 def _score_growth(g: float | None) -> float:
+    """Score a growth rate on a 0-10 scale, higher is higher.
+
+    Parameters
+    ----------
+    g : float | None
+        Revenue or earnings growth as a fraction (0.15 = 15%). None scores
+        neutral (5.0).
+
+    Returns
+    -------
+    float
+        0-10 score.
+    """
     if g is None:
         return 5.0
     if g >= 0.25:  return 10.0
@@ -69,6 +118,18 @@ def _score_growth(g: float | None) -> float:
 
 
 def _score_roe(roe: float | None) -> float:
+    """Score return on equity on a 0-10 scale, higher is higher.
+
+    Parameters
+    ----------
+    roe : float | None
+        Return on equity as a fraction (0.18 = 18%). None scores neutral (5.0).
+
+    Returns
+    -------
+    float
+        0-10 score.
+    """
     if roe is None:
         return 5.0
     if roe >= 0.25: return 10.0
@@ -80,6 +141,18 @@ def _score_roe(roe: float | None) -> float:
 
 
 def _score_op_margin(m: float | None) -> float:
+    """Score operating margin on a 0-10 scale, higher is higher.
+
+    Parameters
+    ----------
+    m : float | None
+        Operating margin as a fraction (0.18 = 18%). None scores neutral (5.0).
+
+    Returns
+    -------
+    float
+        0-10 score.
+    """
     if m is None:
         return 5.0
     if m >= 0.25: return 10.0
@@ -91,6 +164,21 @@ def _score_op_margin(m: float | None) -> float:
 
 
 def _score_fcf_margin(fcf: float | None, revenue: float | None) -> tuple[float, float | None]:
+    """Score free-cash-flow margin on a 0-10 scale, higher is higher.
+
+    Parameters
+    ----------
+    fcf : float | None
+        Free cash flow.
+    revenue : float | None
+        Total revenue. Missing/non-positive revenue yields a 0 score and no
+        margin.
+
+    Returns
+    -------
+    tuple[float, float | None]
+        (0-10 score, computed FCF margin or None).
+    """
     if not fcf or not revenue or revenue <= 0:
         return 0.0, None
     m = fcf / revenue
@@ -103,7 +191,20 @@ def _score_fcf_margin(fcf: float | None, revenue: float | None) -> tuple[float, 
 
 
 def _score_debt_equity(de_pct: float | None) -> tuple[float, float | None]:
-    """yfinance reports D/E as a percentage (100 = 1.0x). Normalise."""
+    """Score debt-to-equity on a 0-10 scale, less leverage is higher.
+
+    yfinance reports D/E as a percentage (100 = 1.0x); normalised to a ratio here.
+
+    Parameters
+    ----------
+    de_pct : float | None
+        Debt-to-equity in percent form. None scores neutral (5.0).
+
+    Returns
+    -------
+    tuple[float, float | None]
+        (0-10 score, normalised D/E ratio or None).
+    """
     if de_pct is None:
         return 5.0, None
     de = de_pct / 100.0
@@ -126,6 +227,18 @@ WEIGHTS = {
 
 
 def _tier(score: float) -> str:
+    """Map a composite 0-10 score to a tier label.
+
+    Parameters
+    ----------
+    score : float
+        Composite fundamental score.
+
+    Returns
+    -------
+    str
+        One of Strong / Solid / Average / Weak / Avoid.
+    """
     if score >= 8.0: return "Strong"
     if score >= 6.0: return "Solid"
     if score >= 4.0: return "Average"
@@ -134,7 +247,20 @@ def _tier(score: float) -> str:
 
 
 def score_fundamentals(m: dict) -> dict:
-    """Pure scoring. `m` is a metrics dict from fetch_fundamentals (or test fixture)."""
+    """Score five weighted dimensions into a composite and tier.
+
+    Pure — takes a plain metrics dict so it can be unit-tested without yfinance.
+
+    Parameters
+    ----------
+    m : dict
+        Metrics dict from `fetch_fundamentals` (or a test fixture).
+
+    Returns
+    -------
+    dict
+        {score, tier, dimensions (per-dimension score + metrics), flags, raw}.
+    """
     pe_score = _score_pe(m.get("forward_pe") or m.get("trailing_pe"))
     pb_score = _score_pb(m.get("price_to_book"))
     ev_score = _score_ev_ebitda(m.get("ev_ebitda"))
@@ -198,7 +324,7 @@ def score_fundamentals(m: dict) -> dict:
 # --- data fetch ------------------------------------------------------------
 
 def fetch_fundamentals(ticker: str) -> dict:
-    """Raw fundamentals with retry and last-good fallback.
+    """Fundamentals with retry and last-good fallback.
 
     Critical leg, so a transient `.info` failure serves the last-good metrics
     and keeps the score chip alive instead of erroring the whole ticker.
@@ -259,18 +385,71 @@ def _fetch_fundamentals_raw(ticker: str) -> dict:
 # --- formatting ------------------------------------------------------------
 
 def _fmt_pct(v: float | None) -> str:
+    """Format a fraction as a percentage, or "n/a" when None.
+
+    Parameters
+    ----------
+    v : float | None
+        Value as a fraction (0.15 = 15%).
+
+    Returns
+    -------
+    str
+        Percentage string or "n/a".
+    """
     return f"{v:.1%}" if v is not None else "n/a"
 
 
 def _fmt_num(v: float | None, fmt: str = ".2f") -> str:
+    """Format a number with the given spec, or "n/a" when None.
+
+    Parameters
+    ----------
+    v : float | None
+        Value to format.
+    fmt : str, optional
+        Format spec, default ".2f".
+
+    Returns
+    -------
+    str
+        Formatted number or "n/a".
+    """
     return f"{v:{fmt}}" if v is not None else "n/a"
 
 
 def _fmt_billions(v: float | None) -> str:
+    """Format a raw dollar amount in billions, or "n/a" when falsy.
+
+    Parameters
+    ----------
+    v : float | None
+        Dollar amount.
+
+    Returns
+    -------
+    str
+        e.g. "$1.5B" or "n/a".
+    """
     return f"${v / 1e9:.1f}B" if v else "n/a"
 
 
 def format_fundamentals(scored: dict) -> str:
+    """Render a scored fundamentals dict as a markdown block.
+
+    Feeds both the final-analysis LLM prompt and the card dialog.
+
+    Parameters
+    ----------
+    scored : dict
+        Output of `score_fundamentals`.
+
+    Returns
+    -------
+    str
+        Multi-line markdown with the composite score, per-dimension lines,
+        and any flags.
+    """
     raw = scored["raw"]
     d = scored["dimensions"]
     lines = [
