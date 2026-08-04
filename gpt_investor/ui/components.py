@@ -306,7 +306,28 @@ def explainer_controls() -> rx.Component:
                     spacing="1", align="start",
                 ),
             ),
-            rx.fragment(),
+            # Generated → render the summary right here, at the bottom, next to
+            # the button that produced it (no jump to the top of the dialog).
+            rx.box(
+                rx.hstack(
+                    rx.icon("message-square-text", size=14, color="gray"),
+                    rx.text("Plain English", size="1", weight="medium", color="gray"),
+                    spacing="2", align="center", padding_bottom="0.4em",
+                ),
+                rx.cond(
+                    State.selected_explainer_partial,
+                    rx.callout(
+                        "AI summary — some analysis layers were unavailable, so this may be incomplete or wrong.",
+                        icon="triangle-alert",
+                        color_scheme="amber",
+                        size="1",
+                        margin_bottom="0.6em",
+                    ),
+                    rx.fragment(),
+                ),
+                analysis_html_renderer(html=State.selected_explainer_html),
+                width="100%",
+            ),
         ),
         spacing="2",
         align="start",
@@ -438,32 +459,6 @@ def analysis_dialog() -> rx.Component:
                                 ),
                                 rx.fragment(),
                             ),
-                            padding_bottom="1em",
-                            border_bottom="1px solid var(--gray-a5)",
-                            margin_bottom="1em",
-                        ),
-                        rx.fragment(),
-                    ),
-                    rx.cond(
-                        State.selected_explainer_html != "",
-                        rx.box(
-                            rx.hstack(
-                                rx.icon("message-square-text", size=14, color="gray"),
-                                rx.text("Plain English", size="1", weight="medium", color="gray"),
-                                spacing="2", align="center", padding_bottom="0.4em",
-                            ),
-                            rx.cond(
-                                State.selected_explainer_partial,
-                                rx.callout(
-                                    "AI summary — some analysis layers were unavailable, so this may be incomplete or wrong.",
-                                    icon="triangle-alert",
-                                    color_scheme="amber",
-                                    size="1",
-                                    margin_bottom="0.6em",
-                                ),
-                                rx.fragment(),
-                            ),
-                            analysis_html_renderer(html=State.selected_explainer_html),
                             padding_bottom="1em",
                             border_bottom="1px solid var(--gray-a5)",
                             margin_bottom="1em",
