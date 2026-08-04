@@ -125,6 +125,7 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     sent_color = State.sent_color[ticker]
     wyck_summary = State.wyck_summary[ticker]
     wyck_color = State.wyck_color[ticker]
+    earnings = State.earnings_banner[ticker]
     setup_why = State.setup_why[ticker]
     audit_label = State.audit_label[ticker]
     audit_color = State.audit_color[ticker]
@@ -132,6 +133,11 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     return rx.card(
         rx.vstack(
             rx.heading(ticker, size="5", weight="bold"),
+            rx.cond(
+                earnings != "",
+                rx.badge(earnings, color_scheme="red", variant="solid", radius="full", size="1"),
+                rx.fragment(),
+            ),
             rx.text(
                 State.names[ticker_kv[0]],
                 size="1",
@@ -226,6 +232,11 @@ def analysis_dialog() -> rx.Component:
                                 rx.badge("Cached", color_scheme="blue", variant="soft", radius="full", size="1"),
                                 rx.fragment(),
                             ),
+                            rx.cond(
+                                State.selected_earnings_banner != "",
+                                rx.badge(State.selected_earnings_banner, color_scheme="red", variant="solid", radius="full", size="1"),
+                                rx.fragment(),
+                            ),
                             spacing="2",
                             align="center",
                         ),
@@ -312,6 +323,14 @@ def analysis_dialog() -> rx.Component:
                                 State.selected_audit_html != "",
                                 rx.box(
                                     analysis_html_renderer(html=State.selected_audit_html),
+                                    padding_top="0.8em",
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.cond(
+                                State.selected_signals_html != "",
+                                rx.box(
+                                    analysis_html_renderer(html=State.selected_signals_html),
                                     padding_top="0.8em",
                                 ),
                                 rx.fragment(),
