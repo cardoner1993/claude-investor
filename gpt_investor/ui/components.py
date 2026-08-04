@@ -126,6 +126,8 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     wyck_summary = State.wyck_summary[ticker]
     wyck_color = State.wyck_color[ticker]
     setup_why = State.setup_why[ticker]
+    audit_label = State.audit_label[ticker]
+    audit_color = State.audit_color[ticker]
 
     return rx.card(
         rx.vstack(
@@ -158,6 +160,11 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
             rx.cond(
                 setup_why != "",
                 rx.badge(setup_why, color_scheme="violet", variant="soft", radius="full", size="1"),
+                rx.fragment(),
+            ),
+            rx.cond(
+                audit_label != "",
+                rx.badge("audit: ", audit_label, color_scheme=audit_color, variant="soft", radius="full", size="1"),
                 rx.fragment(),
             ),
             rx.cond(
@@ -297,6 +304,14 @@ def analysis_dialog() -> rx.Component:
                                 State.selected_wyck_html != "",
                                 rx.box(
                                     analysis_html_renderer(html=State.selected_wyck_html),
+                                    padding_top="0.8em",
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.cond(
+                                State.selected_audit_html != "",
+                                rx.box(
+                                    analysis_html_renderer(html=State.selected_audit_html),
                                     padding_top="0.8em",
                                 ),
                                 rx.fragment(),
