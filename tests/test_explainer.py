@@ -37,6 +37,18 @@ def test_explain_verdict_builds_message_from_blocks(monkeypatch):
         assert token in captured["user"]
 
 
+def test_explain_verdict_flags_partial_inputs(monkeypatch):
+    monkeypatch.setattr(explainer, "call_claude", lambda *a, **k: "the synthesis")
+    # macro + wyckoff missing → note appended, other blocks present
+    out = explainer.explain_verdict("FUND", "SENT", "", "", "VERDICT")
+    assert out.startswith("the synthesis")
+    assert "partial inputs" in out
+    assert "macro" in out.lower() and "wyckoff" in out.lower()
+    # all blocks present → no note
+    full = explainer.explain_verdict("F", "S", "W", "M", "VERDICT")
+    assert "partial inputs" not in full
+
+
 def test_explain_verdict_swallows_errors(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("cli down")

@@ -58,19 +58,39 @@ def explain_verdict(
     -------
     str
         Plain-English walkthrough of why the verdict landed, or "" on failure.
+        If any input block was empty, a one-line note is appended flagging that
+        the summary is based on partial inputs (and the gap is logged).
     """
     if not verdict_md:
         return ""
-    parts = [
-        f"Fundamentals:\n{fund_block}" if fund_block else "",
-        f"Sentiment:\n{sentiment_block}" if sentiment_block else "",
-        f"Technical / Wyckoff:\n{wyckoff_block}" if wyckoff_block else "",
-        f"Macro:\n{macro_block}" if macro_block else "",
-        f"Verdict:\n{verdict_md}",
-    ]
-    user_message = "\n\n".join(p for p in parts if p)
+
+    blocks = {
+        "Fundamentals": fund_block,
+        "Sentiment": sentiment_block,
+        "Technical / Wyckoff": wyckoff_block,
+        "Macro": macro_block,
+    }
+    # Any layer the synthesis didn't receive → the explanation can't speak to it.
+    # Log it and warn the reader inline so a partial summary isn't mistaken for
+    # a complete one.
+    missing = [name for name, text in blocks.items() if not text]
+    if missing:
+        logger.warning("explain_verdict missing input blocks: {}", ", ".join(missing))
+
+    parts = [f"{name}:\n{text}" for name, text in blocks.items() if text]
+    parts.append(f"Verdict:\n{verdict_md}")
+    user_message = "\n\n".join(parts)
+
     try:
-        return call_claude(_SYSTEM_PROMPT, user_message, model="haiku", tools=False).strip()
+        text = call_claude(_SYSTEM_PROMPT, user_message, model="haiku", tools=False).strip()
     except Exception as e:
         logger.warning("explain_verdict failed: {}", e)
         return ""
+    if not text:
+        return ""
+    if missing:
+        text += (
+            f"\n\n_Note: this summary is based on partial inputs — "
+            f"{', '.join(missing).lower()} data was unavailable._"
+        )
+    return text
