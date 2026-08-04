@@ -1,4 +1,5 @@
 from gpt_investor.llm import explainer
+from gpt_investor.llm.explainer import ExplanationLLM
 from gpt_investor.llm.schemas import PROMPT_VERSION
 from gpt_investor.storage import cache
 
@@ -9,51 +10,49 @@ def test_explain_verdict_short_circuits_without_verdict(monkeypatch):
     def _boom(*a, **k):
         nonlocal called
         called = True
-        return "x"
+        return None
 
-    monkeypatch.setattr(explainer, "call_claude", _boom)
+    monkeypatch.setattr(explainer, "call_claude_structured", _boom)
     assert explainer.explain_verdict("fund", "sent", "wyck", "macro", "") == ""
     assert called is False
 
 
-def test_explain_verdict_builds_message_from_blocks(monkeypatch):
+def test_explain_verdict_builds_message_and_validates(monkeypatch):
     captured = {}
 
-    def _fake(system, user, model="haiku", tools=True):
-        captured["system"] = system
-        captured["user"] = user
-        captured["tools"] = tools
-        captured["model"] = model
-        return "  plain english out  "
+    def _fake(schema, system, user, model="haiku", tools=True):
+        captured.update(schema=schema, user=user, tools=tools, model=model)
+        return ExplanationLLM(explanation="  a validated plain-english synthesis paragraph.  ")
 
-    monkeypatch.setattr(explainer, "call_claude", _fake)
+    monkeypatch.setattr(explainer, "call_claude_structured", _fake)
     out = explainer.explain_verdict(
         "FUND-BLOCK", "SENT-BLOCK", "WYCK-BLOCK", "MACRO-BLOCK", "VERDICT-MD"
     )
-    assert out == "plain english out"
-    assert captured["tools"] is False
-    assert captured["model"] == "haiku"
+    assert out == "a validated plain-english synthesis paragraph."   # stripped
+    assert captured["schema"] is ExplanationLLM                       # schema-enforced
+    assert captured["tools"] is False and captured["model"] == "haiku"
     for token in ("FUND-BLOCK", "SENT-BLOCK", "WYCK-BLOCK", "MACRO-BLOCK", "VERDICT-MD"):
         assert token in captured["user"]
 
 
-def test_explain_verdict_flags_partial_inputs(monkeypatch):
-    monkeypatch.setattr(explainer, "call_claude", lambda *a, **k: "the synthesis")
-    # macro + wyckoff missing → note appended, other blocks present
-    out = explainer.explain_verdict("FUND", "SENT", "", "", "VERDICT")
-    assert out.startswith("the synthesis")
-    assert "partial inputs" in out
-    assert "macro" in out.lower() and "wyckoff" in out.lower()
-    # all blocks present → no note
-    full = explainer.explain_verdict("F", "S", "W", "M", "VERDICT")
-    assert "partial inputs" not in full
+def test_explain_verdict_returns_empty_on_invalid_output(monkeypatch):
+    monkeypatch.setattr(explainer, "call_claude_structured", lambda *a, **k: None)
+    assert explainer.explain_verdict("f", "s", "w", "m", "VERDICT") == ""
+
+
+def test_explain_verdict_defangs_html(monkeypatch):
+    payload = ExplanationLLM(explanation="Solid setup <script>alert(1)</script> with upside now.")
+    monkeypatch.setattr(explainer, "call_claude_structured", lambda *a, **k: payload)
+    out = explainer.explain_verdict("f", "s", "w", "m", "VERDICT")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
 
 
 def test_explain_verdict_swallows_errors(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("cli down")
 
-    monkeypatch.setattr(explainer, "call_claude", _boom)
+    monkeypatch.setattr(explainer, "call_claude_structured", _boom)
     assert explainer.explain_verdict("f", "s", "w", "m", "verdict") == ""
 
 

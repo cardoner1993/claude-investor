@@ -232,6 +232,7 @@ class State(rx.State):
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
     explainer_html: dict[str, str] = {} # ticker -> plain-English explanation (rendered HTML)
+    explainer_partial: dict[str, bool] = {}  # ticker -> True if built from incomplete inputs
     explainer_loading: bool = False     # true while the open dialog's explainer is generating
     liquidity_context: str = ""
     liquidity_html: str = ""
@@ -262,6 +263,7 @@ class State(rx.State):
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
     selected_explainer_html: str = ""
+    selected_explainer_partial: bool = False
 
     @rx.var
     def all_done(self) -> bool:
@@ -321,6 +323,7 @@ class State(rx.State):
         self.wyck_color = {}
         self.wyck_block = {}
         self.explainer_html = {}
+        self.explainer_partial = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -387,6 +390,7 @@ class State(rx.State):
         # Plain-English explainer: show any memoized copy immediately, then fire
         # the background generator to fill it on a miss.
         self.selected_explainer_html = self.explainer_html.get(ticker, "")
+        self.selected_explainer_partial = self.explainer_partial.get(ticker, False)
         return State.generate_explainer
 
     @rx.event(background=True)
@@ -408,6 +412,10 @@ class State(rx.State):
             macro = self.liquidity_context
             verdict = self.analyses.get(ticker, "")
 
+        # Any layer block absent → the synthesis can't speak to it, so the
+        # summary is partial. Track it to surface a warning in the dialog.
+        partial = not all([fund, sent, wyck, macro])
+
         cached = await asyncio.to_thread(get_cached_explainer, ticker, EXPLAINER_VERSION)
         if cached:
             text = cached
@@ -420,8 +428,10 @@ class State(rx.State):
         async with self:
             if html:
                 self.explainer_html[ticker] = html
+                self.explainer_partial[ticker] = partial
             if self.selected_ticker == ticker:
                 self.selected_explainer_html = html
+                self.selected_explainer_partial = partial if html else False
             self.explainer_loading = False
 
     def close_ticker(self):
@@ -439,6 +449,7 @@ class State(rx.State):
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
         self.selected_explainer_html = ""
+        self.selected_explainer_partial = False
         self.explainer_loading = False
 
     def handle_submit(self, data: dict):

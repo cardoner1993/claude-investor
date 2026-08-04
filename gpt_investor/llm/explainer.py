@@ -9,9 +9,26 @@ dialog is free and a prompt-version bump recomputes.
 """
 
 from loguru import logger
+from pydantic import BaseModel, Field
 
-from gpt_investor.llm.claude import call_claude
+from gpt_investor.llm.claude import call_claude_structured
 from gpt_investor.llm.schemas import PROMPT_VERSION
+
+
+class ExplanationLLM(BaseModel):
+    """Schema the explainer LLM must satisfy.
+
+    A single prose field with hard length bounds. Routing through
+    `call_claude_structured` means the model's output is validated (present,
+    non-trivial, not runaway) before we ever cache or render it — we never push
+    unverified free text into SQLite.
+    """
+
+    explanation: str = Field(
+        min_length=40,
+        max_length=1500,
+        description="2-3 paragraph plain-English walkthrough. Prose only, no markup.",
+    )
 
 # The explainer caches under its OWN version so editing _SYSTEM_PROMPT below
 # busts stale prose, independently of the verdict's PROMPT_VERSION. Bump the
@@ -57,9 +74,9 @@ def explain_verdict(
     Returns
     -------
     str
-        Plain-English walkthrough of why the verdict landed, or "" on failure.
-        If any input block was empty, a one-line note is appended flagging that
-        the summary is based on partial inputs (and the gap is logged).
+        Validated, HTML-defanged plain-English walkthrough, or "" if the model
+        produced nothing schema-valid. Missing input layers are logged; the
+        partial-input warning is surfaced separately in the UI by the caller.
     """
     if not verdict_md:
         return ""
@@ -70,9 +87,6 @@ def explain_verdict(
         "Technical / Wyckoff": wyckoff_block,
         "Macro": macro_block,
     }
-    # Any layer the synthesis didn't receive → the explanation can't speak to it.
-    # Log it and warn the reader inline so a partial summary isn't mistaken for
-    # a complete one.
     missing = [name for name, text in blocks.items() if not text]
     if missing:
         logger.warning("explain_verdict missing input blocks: {}", ", ".join(missing))
@@ -82,15 +96,31 @@ def explain_verdict(
     user_message = "\n\n".join(parts)
 
     try:
-        text = call_claude(_SYSTEM_PROMPT, user_message, model="haiku", tools=False).strip()
+        parsed = call_claude_structured(
+            ExplanationLLM, _SYSTEM_PROMPT, user_message, model="haiku", tools=False
+        )
     except Exception as e:
         logger.warning("explain_verdict failed: {}", e)
         return ""
-    if not text:
+    if parsed is None:
+        logger.warning("explain_verdict: no schema-valid output — not caching")
         return ""
-    if missing:
-        text += (
-            f"\n\n_Note: this summary is based on partial inputs — "
-            f"{', '.join(missing).lower()} data was unavailable._"
-        )
-    return text
+    return _defang(parsed.explanation.strip())
+
+
+def _defang(text: str) -> str:
+    """Neutralise raw HTML in LLM prose before it is markdown-rendered into the
+    dialog via `dangerouslySetInnerHTML`. The explainer is prose only, so
+    escaping angle brackets is lossless and blocks tag/script injection.
+
+    Parameters
+    ----------
+    text : str
+        Model-produced explanation text.
+
+    Returns
+    -------
+    str
+        Same text with `<`/`>` escaped to HTML entities.
+    """
+    return text.replace("<", "&lt;").replace(">", "&gt;")

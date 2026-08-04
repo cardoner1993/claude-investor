@@ -299,6 +299,17 @@ def analysis_dialog() -> rx.Component:
                                 rx.text("Plain English", size="1", weight="medium", color="gray"),
                                 spacing="2", align="center", padding_bottom="0.4em",
                             ),
+                            rx.cond(
+                                State.selected_explainer_partial,
+                                rx.callout(
+                                    "AI summary — some analysis layers were unavailable, so this may be incomplete or wrong.",
+                                    icon="triangle-alert",
+                                    color_scheme="amber",
+                                    size="1",
+                                    margin_bottom="0.6em",
+                                ),
+                                rx.fragment(),
+                            ),
                             analysis_html_renderer(html=State.selected_explainer_html),
                             padding_bottom="1em",
                             border_bottom="1px solid var(--gray-a5)",
