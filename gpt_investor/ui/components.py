@@ -69,7 +69,7 @@ logger.info("startup industry groups ready: {} sectors", len(_YF_INDUSTRY_GROUPS
 
 
 @rx.memo
-def analysis_html_renderer(html: str) -> rx.Component:
+def analysis_html_renderer(html: rx.Var[str]) -> rx.Component:
     """Render pre-rendered analysis HTML via dangerouslySetInnerHTML.
 
     Separate memoized component so it gets its own JS file with useContext.
@@ -90,7 +90,7 @@ def analysis_html_renderer(html: str) -> rx.Component:
 
 
 @rx.memo
-def liquidity_html_renderer(html: str) -> rx.Component:
+def liquidity_html_renderer(html: rx.Var[str]) -> rx.Component:
     """Render pre-rendered liquidity HTML via dangerouslySetInnerHTML.
 
     Parameters
