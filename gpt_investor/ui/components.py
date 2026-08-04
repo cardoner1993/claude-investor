@@ -125,6 +125,7 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     sent_color = State.sent_color[ticker]
     wyck_summary = State.wyck_summary[ticker]
     wyck_color = State.wyck_color[ticker]
+    setup_why = State.setup_why[ticker]
     audit_label = State.audit_label[ticker]
     audit_color = State.audit_color[ticker]
 
@@ -154,6 +155,11 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
             rx.cond(
                 wyck_summary != "",
                 rx.badge(wyck_summary, color_scheme=wyck_color, variant="outline", radius="full", size="1"),
+                rx.fragment(),
+            ),
+            rx.cond(
+                setup_why != "",
+                rx.badge(setup_why, color_scheme="violet", variant="soft", radius="full", size="1"),
                 rx.fragment(),
             ),
             rx.cond(
@@ -272,6 +278,16 @@ def analysis_dialog() -> rx.Component:
                                     ),
                                     rx.fragment(),
                                 ),
+                                rx.cond(
+                                    State.selected_setup_why != "",
+                                    rx.badge(
+                                        State.selected_setup_why,
+                                        color_scheme="violet",
+                                        variant="soft",
+                                        radius="full",
+                                    ),
+                                    rx.fragment(),
+                                ),
                                 spacing="2",
                                 padding_bottom="0.5em",
                             ),
@@ -384,7 +400,7 @@ def status_line() -> rx.Component:
             ),
             rx.cond(
                 State.discovery_mode == "trending",
-                rx.text("Analysing today's trending companies", size="2", color="gray"),
+                rx.text("Analysing today's top setups", size="2", color="gray"),
                 rx.cond(
                     State.discovery_mode == "single",
                     rx.text("Analysing ", State.company_query, size="2", color="gray"),
@@ -537,7 +553,7 @@ def search_form() -> rx.Component:
             rx.hstack(
                 rx.button(
                     rx.icon("trending-up", size=14),
-                    "Today's Trending",
+                    "Today's Setups",
                     on_click=State.trending_pick,
                     loading=(State.stage == "analyzing"),
                     variant="surface",
