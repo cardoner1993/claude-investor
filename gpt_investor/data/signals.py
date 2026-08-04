@@ -17,7 +17,6 @@ can measure its lift — wiring that column lives with the data layer (#4).
 
 from __future__ import annotations
 
-import math
 import statistics
 import threading
 from datetime import date
@@ -26,6 +25,11 @@ import yfinance as yf
 from cachetools import TTLCache
 from loguru import logger
 
+from gpt_investor.data.frames import _safe_float, _as_date, _row, _raw_row
+# format_signals is re-exported here so existing `from ...data.signals import
+# format_signals` callers keep working after the move to data/formatting.py.
+from gpt_investor.data.formatting import format_signals  # noqa: F401
+
 _HIGH_SHORT = 0.15          # >15% of float short = crowded-short flag
 _EARNINGS_SOON = 7          # days to earnings under this = banner
 
@@ -33,32 +37,19 @@ _peer_cache: TTLCache = TTLCache(maxsize=64, ttl=6 * 3600)
 _peer_lock = threading.Lock()
 
 
-def _safe_float(x) -> float | None:
-    """Coerce a value to a finite float, or None.
-
-    None when the value can't be parsed or is NaN/inf.
-
-    Parameters
-    ----------
-    x : object
-        Value to coerce.
-
-    Returns
-    -------
-    float | None
-        Finite float, or None on failure.
-    """
-    try:
-        v = float(x)
-        return v if not (math.isnan(v) or math.isinf(v)) else None
-    except (TypeError, ValueError):
-        return None
-
-
 # --- B1 short interest -----------------------------------------------------
 
 def score_short_interest(short_pct: float | None) -> dict:
     """Score short interest and flag crowded shorts.
+
+    Short interest = the share of a company's freely-tradable stock that traders
+    have borrowed and sold, betting the price will fall (they profit if they can
+    buy it back cheaper). A high figure means a lot of the market is positioned
+    against the stock. That cuts two ways: it can signal real trouble, or it can
+    set up a "short squeeze" — if the price rises, those traders must buy back to
+    cover, pushing it up further. We flag anything above 15% of float as
+    crowded, worth a closer look either way.
+    See https://www.investopedia.com/terms/s/shortinterest.asp
 
     Parameters
     ----------
@@ -441,156 +432,3 @@ def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
         "op_margin_slope": op_margin_slope,
         "peers": peers,
     }
-
-
-def _as_date(x) -> date | None:
-    """Coerce a value or pandas Timestamp to a `date`, or None.
-
-    Parameters
-    ----------
-    x : object
-        Value to coerce; `date` passes through, Timestamp is downcast.
-
-    Returns
-    -------
-    date | None
-        A `date`, or None when the value can't be converted.
-    """
-    if isinstance(x, date):
-        return x
-    try:
-        return x.date()  # pandas Timestamp
-    except AttributeError:
-        return None
-
-
-def _row(df, label: str) -> list[float] | None:
-    """Clean row of a yfinance statement DataFrame, newest→oldest.
-
-    Use for standalone series (CAGR endpoints) where position alignment across
-    rows doesn't matter.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Statement frame indexed by line-item label.
-    label : str
-        Row label to extract.
-
-    Returns
-    -------
-    list[float] | None
-        Floats with NaN dropped, or None when the row is absent or empty.
-    """
-    raw = _raw_row(df, label)
-    if raw is None:
-        return None
-    return [v for v in raw if v is not None] or None
-
-
-def _raw_row(df, label: str) -> list | None:
-    """Raw row, newest→oldest, with NaN kept as None (positions preserved).
-
-    Use when two rows must stay column-aligned before dropping missing cells.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Statement frame indexed by line-item label.
-    label : str
-        Row label to extract.
-
-    Returns
-    -------
-    list | None
-        Floats/None per column, or None when the row is absent or extraction
-        fails.
-    """
-    try:
-        if label not in df.index:
-            return None
-        return [_safe_float(v) for v in df.loc[label].tolist()]
-    except Exception:
-        return None
-
-
-# --- formatting ------------------------------------------------------------
-
-def _fmt_pct(v: float | None) -> str:
-    """Format a fraction as a signed percentage, or "n/a".
-
-    Parameters
-    ----------
-    v : float | None
-        Fraction to format.
-
-    Returns
-    -------
-    str
-        Signed percentage (e.g. "+12.0%"), or "n/a" when None.
-    """
-    return f"{v:+.1%}" if v is not None else "n/a"
-
-
-def _fmt_flow(v: float | None) -> str:
-    """Format a dollar flow in signed millions, or "n/a".
-
-    Parameters
-    ----------
-    v : float | None
-        Dollar value to format.
-
-    Returns
-    -------
-    str
-        Signed millions (e.g. "+$3.2M"), or "n/a" when None.
-    """
-    if v is None:
-        return "n/a"
-    return f"{'+' if v >= 0 else '-'}${abs(v) / 1e6:.1f}M"
-
-
-def format_signals(sig: dict) -> str:
-    """Render a signals dict as a Markdown block for the prompt and dialog.
-
-    Parameters
-    ----------
-    sig : dict
-        Signals dict as returned by `fetch_signals`.
-
-    Returns
-    -------
-    str
-        Multi-line Markdown summarising short interest, earnings, insider flow,
-        multi-year trend, and peer valuation.
-    """
-    short = sig.get("short", {})
-    peers = sig.get("peers", {})
-    lines = ["**Higher-signal data**", ""]
-
-    short_pct = short.get("short_pct")
-    short_line = f"- Short interest: {short_pct:.1%} of float" if short_pct is not None else "- Short interest: n/a"
-    if short.get("crowded"):
-        short_line += " ⚠ crowded short (>15%)"
-    lines.append(short_line)
-
-    ed = sig.get("earnings_days")
-    lines.append(f"- Next earnings: {'in ' + str(ed) + 'd' if ed is not None else 'n/a'}"
-                 + (f"  ⚠ {sig['earnings_banner']}" if sig.get("earnings_banner") else ""))
-
-    lines.append(f"- Insider net flow: 30d {_fmt_flow(sig.get('insider_30d'))}, 90d {_fmt_flow(sig.get('insider_90d'))}")
-    lines.append(
-        f"- Multi-year trend: revenue CAGR {_fmt_pct(sig.get('rev_cagr'))}, "
-        f"FCF CAGR {_fmt_pct(sig.get('fcf_cagr'))}, "
-        f"op-margin slope {sig.get('op_margin_slope') if sig.get('op_margin_slope') is not None else 'n/a'}"
-    )
-
-    pe_med = peers.get("pe_median")
-    if pe_med is not None:
-        rel = peers.get("pe_rel") or {}
-        tag = ""
-        if rel.get("ratio") is not None:
-            tag = f" — this name at {rel['ratio']}x the median ({'cheaper' if rel.get('cheaper') else 'richer'})"
-        lines.append(f"- Peer valuation: industry median fwd P/E {pe_med} (n={peers.get('n')}){tag}")
-
-    return "\n".join(lines)
