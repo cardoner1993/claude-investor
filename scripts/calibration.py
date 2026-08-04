@@ -24,19 +24,26 @@ _GROUP_FIELDS = ["fund_tier", "verdict", "sentiment_conf", "regime_label", "wyck
 
 
 def _ret(a: float | None, b: float | None) -> float | None:
-    """Simple return `(b - a) / a`, or None if either endpoint is missing.
+    """Fractional price change from `a` to `b`: `(b - a) / a`.
+
+    A plain holding-period return — e.g. 100 → 110 gives 0.10 (+10%),
+    100 → 90 gives -0.10 (-10%). Used to turn a verdict's capture price and its
+    later close (or SPY's) into a return the calibration can average and compare.
+    Returns None when a return can't be defined — a missing endpoint, or a zero
+    start price (division by zero) — so bad rows are skipped rather than crashing.
 
     Parameters
     ----------
     a : float or None
-        Start value (denominator).
+        Start (capture) price — the denominator.
     b : float or None
-        End value.
+        End (horizon) price.
 
     Returns
     -------
     float or None
-        The fractional return, or None when `a` is missing/zero or `b` is missing.
+        Fractional return (0.10 = +10%), or None if `a` is missing/zero or `b`
+        is missing.
     """
     if a is None or b is None or a == 0:
         return None
