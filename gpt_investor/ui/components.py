@@ -166,7 +166,6 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
     wyck_summary = State.wyck_summary[ticker]
     wyck_color = State.wyck_color[ticker]
     earnings = State.earnings_banner[ticker]
-    setup_why = State.setup_why[ticker]
     audit_label = State.audit_label[ticker]
     audit_color = State.audit_color[ticker]
 
@@ -201,11 +200,6 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
             rx.cond(
                 wyck_summary != "",
                 rx.badge(wyck_summary, color_scheme=wyck_color, variant="outline", radius="full", size="1"),
-                rx.fragment(),
-            ),
-            rx.cond(
-                setup_why != "",
-                rx.badge(setup_why, color_scheme="violet", variant="soft", radius="full", size="1"),
                 rx.fragment(),
             ),
             rx.cond(
@@ -248,13 +242,76 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
             spacing="2",
             align="center",
         ),
-        width="140px",
-        height="180px",
+        width="150px",
+        min_height="180px",
         display="flex",
         align_items="center",
         justify_content="center",
         cursor=rx.cond(is_done, "pointer", "default"),
         on_click=rx.cond(is_done, State.open_ticker(ticker), rx.noop()),
+    )
+
+
+def explainer_controls() -> rx.Component:
+    """Bottom-of-dialog controls: external deep-dive links + an on-demand
+    "generate plain-English summary" button (no longer auto-runs on open).
+
+    Returns
+    -------
+    rx.Component
+    """
+    yahoo = "https://finance.yahoo.com/quote/" + State.selected_ticker
+    tradingview = "https://www.tradingview.com/symbols/" + State.selected_ticker + "/"
+    return rx.vstack(
+        rx.divider(margin_top="0.8em", margin_bottom="0.6em"),
+        rx.hstack(
+            rx.link(
+                rx.button(
+                    rx.icon("external-link", size=13), "Yahoo Finance",
+                    size="1", variant="soft", color_scheme="gray",
+                ),
+                href=yahoo, target="_blank",
+            ),
+            rx.link(
+                rx.button(
+                    rx.icon("line-chart", size=13), "TradingView",
+                    size="1", variant="soft", color_scheme="gray",
+                ),
+                href=tradingview, target="_blank",
+            ),
+            spacing="2",
+            wrap="wrap",
+        ),
+        rx.cond(
+            State.selected_explainer_html == "",
+            rx.cond(
+                State.explainer_loading,
+                rx.hstack(
+                    rx.spinner(size="1"),
+                    rx.text("Writing plain-English summary...", size="1", color="gray"),
+                    spacing="2", align="center",
+                ),
+                rx.vstack(
+                    rx.button(
+                        rx.icon("message-square-text", size=14),
+                        "Generate plain-English summary",
+                        on_click=State.generate_explainer,
+                        variant="soft", color_scheme="amber", size="1",
+                    ),
+                    rx.cond(
+                        State.selected_explainer_failed,
+                        rx.text("Couldn't generate a summary — try again.", size="1", color="gray"),
+                        rx.fragment(),
+                    ),
+                    spacing="1", align="start",
+                ),
+            ),
+            rx.fragment(),
+        ),
+        spacing="2",
+        align="start",
+        width="100%",
+        padding_top="0.5em",
     )
 
 
@@ -411,26 +468,7 @@ def analysis_dialog() -> rx.Component:
                             border_bottom="1px solid var(--gray-a5)",
                             margin_bottom="1em",
                         ),
-                        rx.cond(
-                            State.explainer_loading,
-                            rx.hstack(
-                                rx.spinner(size="1"),
-                                rx.text("Writing plain-English summary...", size="1", color="gray"),
-                                spacing="2", align="center", padding_bottom="1em",
-                            ),
-                            rx.cond(
-                                State.selected_explainer_failed,
-                                rx.hstack(
-                                    rx.icon("circle-x", size=13, color="gray"),
-                                    rx.text(
-                                        "Plain-English summary couldn't be generated — see the full analysis below.",
-                                        size="1", color="gray",
-                                    ),
-                                    spacing="2", align="center", padding_bottom="1em",
-                                ),
-                                rx.fragment(),
-                            ),
-                        ),
+                        rx.fragment(),
                     ),
                     rx.cond(
                         State.selected_analysis_html != "",
@@ -441,6 +479,7 @@ def analysis_dialog() -> rx.Component:
                             spacing="2", align="center", padding_top="1em",
                         ),
                     ),
+                    explainer_controls(),
                     spacing="2",
                     align="start",
                 ),
