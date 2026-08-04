@@ -126,18 +126,18 @@ def main() -> None:
     filled = 0
     for price_col, days in _HORIZONS.items():
         spy_col = _SPY_COL[price_col]
-        rows = verdicts_needing_outcome(price_col, spy_col)
+        rows = verdicts_needing_outcome(days)
         for row in rows:
             capture = datetime.fromisoformat(row["date"]).date()
             target = capture + timedelta(days=days)
             if today < target:
                 continue  # horizon not elapsed yet
             updates = {}
-            if row["price_val"] is None and row["price"]:
+            if row["price_filled"] is None and row["price"]:
                 f = _return_factor(row["ticker"], capture, target)
                 if f is not None:
                     updates[price_col] = row["price"] * f
-            if row["spy_val"] is None and row["spy_at_capture"]:
+            if row["spy_filled"] is None and row["spy_at_capture"]:
                 f = _return_factor("SPY", capture, target)
                 if f is not None:
                     updates[spy_col] = row["spy_at_capture"] * f
