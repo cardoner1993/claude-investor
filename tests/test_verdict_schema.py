@@ -19,6 +19,10 @@ def _valid_payload(**overrides):
         "industry_addressed": "Sector tailwind from AI capex cycle.",
         "macro_addressed": "Easing Fed reduces equity discount rate.",
         "technical_addressed": "Markup phase confirms entry timing.",
+        "prob_up": 0.55,
+        "prob_flat": 0.30,
+        "prob_down": 0.15,
+        "premortem": "AI capex cycle rolls over and the multiple compresses hard.",
     }
     base.update(overrides)
     return base

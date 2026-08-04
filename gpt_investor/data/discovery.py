@@ -3,11 +3,15 @@ import subprocess
 import threading
 import json
 
+import requests
 import yfinance as yf
 from cachetools import TTLCache
 from loguru import logger
 
 from gpt_investor.llm.claude import add_token_usage
+from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals
+from gpt_investor.data.wyckoff import fetch_ohlcv_batch, compute_signals, score_wyckoff
+from gpt_investor.data.market_regime import get_market_regime
 
 MAX_TICKERS_TO_ANALYZE = int(os.getenv("MAX_TICKERS_TO_ANALYZE", 4))
 
@@ -263,40 +267,351 @@ _TRENDING_SEARCH_TERMS = [
     "most active stocks",
 ]
 
-# Trending caches — 30-minute TTL so repeated runs in a session stay fast
-_yf_trending_cache: TTLCache = TTLCache(maxsize=4, ttl=30 * 60)
-_TRENDING_CACHE_KEY = "trending"
+# Trending-industries cache — 30-minute TTL so repeated runs in a session stay fast
 _yf_trending_industries_cache: TTLCache = TTLCache(maxsize=4, ttl=30 * 60)
 _TRENDING_INDUSTRIES_CACHE_KEY = "trending_industries"
 
 
-def get_trending_tickers(num: int = MAX_TICKERS_TO_ANALYZE) -> dict[str, str]:
-    from collections import Counter
+# --- signal-driven setup discovery (PD') -----------------------------------
+#
+# Supersedes the old "what's trendy on Yahoo" mover funnel. Yahoo screens are
+# demoted to a cheap candidate universe; the tool's OWN deterministic scores
+# (fundamentals tier + Wyckoff phase + regime fit) decide what surfaces. So a
+# day_loser basing in accumulation outranks a day_gainer topping in
+# distribution — the chart sorts dip-buys from falling knives.
 
-    with _yf_lock:
-        cached = _yf_trending_cache.get(_TRENDING_CACHE_KEY)
-    if cached is not None:
-        logger.info("trending {} (cached)", cached[:num])
-        return {t: "pending" for t in cached[:num]}
+_SETUP_SCREENS = ("most_actives", "day_gainers", "day_losers")
+_SCREEN_COUNT = 50          # quotes pulled per predefined screen
+_PREFILTER_N = 60           # cap on names scored (bounds the fundamentals cost)
+_TRENDING_MAX = 15          # trending-endpoint symbols folded into the universe
+_GOOD_PHASES = frozenset({"accumulation", "markup"})
 
-    counts: Counter = Counter()
-    for term in _TRENDING_SEARCH_TERMS:
+_yf_setup_cache: TTLCache = TTLCache(maxsize=4, ttl=15 * 60)
+_SETUP_CACHE_KEY = "setups"
+
+_NON_EQUITY_MARKERS = ("=", "^")
+
+
+def _is_equity_symbol(sym: str) -> bool:
+    """Test whether a symbol is a plain equity ticker.
+
+    Rejects FX (`EURUSD=X`), futures (`GC=F`) and indices (`^GSPC`).
+
+    Parameters
+    ----------
+    sym : str
+        Ticker symbol to check.
+
+    Returns
+    -------
+    bool
+        True if non-empty and free of non-equity markers.
+    """
+    return bool(sym) and not any(m in sym for m in _NON_EQUITY_MARKERS)
+
+
+def _is_equity_quote(q: dict) -> bool:
+    """Test whether a yfinance quote is a plain equity.
+
+    Parameters
+    ----------
+    q : dict
+        yfinance quote with `quoteType` and `symbol` keys.
+
+    Returns
+    -------
+    bool
+        True if `quoteType` is EQUITY and the symbol passes `_is_equity_symbol`.
+    """
+    return q.get("quoteType") == "EQUITY" and _is_equity_symbol(q.get("symbol", ""))
+
+
+def _dollar_volume(q: dict) -> float:
+    """Compute traded dollar-volume for a quote.
+
+    Falls back to 3-month average daily volume when live volume is absent.
+
+    Parameters
+    ----------
+    q : dict
+        yfinance quote with price and volume keys.
+
+    Returns
+    -------
+    float
+        Price times volume; 0.0 when either input is missing.
+    """
+    px = q.get("regularMarketPrice") or 0
+    vol = q.get("regularMarketVolume") or q.get("averageDailyVolume3Month") or 0
+    return float(px) * float(vol)
+
+
+def _trending_endpoint() -> list[str]:
+    """Fetch Yahoo's trending-tickers endpoint, best-effort.
+
+    Only widens the candidate universe, so any failure is harmless.
+
+    Returns
+    -------
+    list[str]
+        Equity symbols from the trending feed; empty on any error.
+    """
+    try:
+        r = requests.get(
+            "https://query1.finance.yahoo.com/v1/finance/trending/US",
+            params={"count": _TRENDING_MAX},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=5,
+        )
+        r.raise_for_status()
+        quotes = r.json().get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        syms = [q.get("symbol", "") for q in quotes]
+        return [s for s in syms if _is_equity_symbol(s)]
+    except Exception as e:
+        logger.warning("trending endpoint failed: {}", e)
+        return []
+
+
+def _screen_universe() -> tuple[dict[str, dict], list[str]]:
+    """Pull the candidate universe from Yahoo screens + trending endpoint.
+
+    Yahoo only *lists* here — no ranking value is taken from the screen order.
+
+    Returns
+    -------
+    tuple[dict[str, dict], list[str]]
+        `(quotes_by_symbol, trending_symbols)`; the first maps symbol to its
+        screen quote, the second is the trending-endpoint symbols.
+    """
+    quotes_by_sym: dict[str, dict] = {}
+    for name in _SETUP_SCREENS:
         try:
-            s = yf.Search(term, max_results=1, news_count=15)
-            for article in s.news:
-                for t in article.get("relatedTickers", []):
-                    if "." not in t and "=" not in t and "^" not in t and t.isupper() and len(t) <= 5:
-                        counts[t] += 1
+            res = yf.screen(name, count=_SCREEN_COUNT)
+            for q in res.get("quotes", []):
+                sym = q.get("symbol")
+                if sym and _is_equity_quote(q):
+                    quotes_by_sym.setdefault(sym, q)
         except Exception as e:
-            logger.warning("trending search '{}' failed: {}", term, e)
+            logger.warning("screen '{}' failed: {}", name, e)
+    trending = _trending_endpoint()
+    logger.info("setup universe: {} screened equities, {} trending", len(quotes_by_sym), len(trending))
+    return quotes_by_sym, trending
 
-    top = [t for t, _ in counts.most_common(num * 2)][:num]
-    logger.info("trending top {}: {}  counts={}", num, top, counts.most_common(num))
+
+def _prefilter_by_dollar_volume(quotes_by_sym: dict[str, dict], trending: list[str], top: int) -> list[str]:
+    """Pick the `top` most-liquid symbols: trending ones first, then the rest by
+    dollar-volume. Caps how many names get the (costly) fundamentals scoring.
+
+    Parameters
+    ----------
+    quotes_by_sym : dict[str, dict]
+        Symbol → screen quote.
+    trending : list[str]
+        Symbols to always include, in order.
+    top : int
+        Max symbols to return.
+
+    Returns
+    -------
+    list[str]
+        Up to `top` symbols.
+    """
+    ranked = sorted(quotes_by_sym.values(), key=_dollar_volume, reverse=True)
+    out: list[str] = []
+    seen: set[str] = set()
+    for sym in trending[:_TRENDING_MAX]:
+        if sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    for q in ranked:
+        sym = q.get("symbol")
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+        if len(out) >= top:
+            break
+    return out[:top]
+
+
+# --- pure scoring (testable without yfinance) ------------------------------
+
+# Timing overlay: does the Wyckoff phase suit the macro regime? Bonus in pp
+# added to the base setup score. First version — tuned by intuition, not fit.
+_REGIME_FIT = {
+    "risk-on-bull":       {"markup": 1.5, "accumulation": 1.0, "neutral": 0.0, "distribution": -1.0, "markdown": -1.5},
+    "panic-opportunity":  {"accumulation": 1.5, "markup": 0.5, "neutral": 0.0, "distribution": -0.5, "markdown": -1.0},
+    "late-cycle-caution": {"accumulation": 0.5, "markup": 0.0, "neutral": 0.0, "distribution": -1.0, "markdown": -1.5},
+    "recession-warning":  {"accumulation": 0.0, "markup": -0.5, "neutral": -0.5, "distribution": -1.5, "markdown": -2.0},
+    "mixed":              {"markup": 0.5, "accumulation": 0.5, "neutral": 0.0, "distribution": -0.5, "markdown": -1.0},
+}
+
+
+def _regime_fit(fund_tier: str, wyckoff_phase: str, regime_label: str | None) -> float:
+    """Look up the timing bonus for a Wyckoff phase under a macro regime.
+
+    Parameters
+    ----------
+    fund_tier : str
+        Fundamentals tier (unused by the current table; kept for signature).
+    wyckoff_phase : str
+        Wyckoff phase, e.g. `accumulation`, `markup`.
+    regime_label : str | None
+        Macro-regime label; falls back to `mixed` when None or unknown.
+
+    Returns
+    -------
+    float
+        Bonus in percentage points; 0.0 for an unmapped phase.
+    """
+    table = _REGIME_FIT.get(regime_label or "mixed", _REGIME_FIT["mixed"])
+    return table.get(wyckoff_phase, 0.0)
+
+
+def _setup_score(fund: dict, wyckoff: dict, regime_label: str | None) -> float:
+    """Blend fundamentals, Wyckoff timing, regime fit and a soft gate.
+
+    Soft gate (+1) rewards the ideal setup — a Solid/Strong company in
+    accumulation or markup — without hard-excluding anything else.
+
+    Parameters
+    ----------
+    fund : dict
+        Fundamentals result with `score` and `tier` keys.
+    wyckoff : dict
+        Wyckoff result with `score` and `phase` keys.
+    regime_label : str | None
+        Macro-regime label passed through to `_regime_fit`.
+
+    Returns
+    -------
+    float
+        Composite setup score, rounded to 2 decimals.
+    """
+    base = 0.55 * fund.get("score", 0.0) + 0.45 * wyckoff.get("score", 0.0)
+    fit = _regime_fit(fund.get("tier", ""), wyckoff.get("phase", ""), regime_label)
+    gate = 1.0 if (fund.get("tier") in ("Strong", "Solid") and wyckoff.get("phase") in _GOOD_PHASES) else 0.0
+    return round(base + fit + gate, 2)
+
+
+def _why_chip(fund: dict, wyckoff: dict, regime_label: str | None) -> str:
+    """Build the short "why" label shown on a setup card.
+
+    The regime tag says whether the macro backdrop *helps* this name's Wyckoff
+    phase: `+regime` (tailwind), `-regime` (headwind), `~regime` (neutral),
+    derived from `_regime_fit`.
+
+    `regime_label` is one of the market-regime classifications:
+        risk-on-bull       — calm vol, healthy curve, credit rising: broad tailwind
+        panic-opportunity  — extreme fear during inversion: washout / dip-buy setup
+        late-cycle-caution — flat/inverted curve + elevated vol: cycle maturing
+        recession-warning  — inversion + vol + credit weakening: broad headwind
+        mixed              — no clear signal
+
+    Parameters
+    ----------
+    fund : dict
+        Fundamentals result with a `tier` key.
+    wyckoff : dict
+        Wyckoff result with a `phase` key.
+    regime_label : str | None
+        Macro-regime label (see above) used to derive the regime tag.
+
+    Returns
+    -------
+    str
+        `"<tier> • <phase> • <+/-/~regime>"`, e.g. `"Strong • markup • +regime"`.
+    """
+    fit = _regime_fit(fund.get("tier", ""), wyckoff.get("phase", ""), regime_label)
+    regime_tag = "+regime" if fit > 0 else "-regime" if fit < 0 else "~regime"
+    return f"{fund.get('tier', '?')} • {wyckoff.get('phase', '?')} • {regime_tag}"
+
+
+def get_setup_candidates(num: int = MAX_TICKERS_TO_ANALYZE) -> dict[str, dict]:
+    """Run signal-driven discovery and return the top setups.
+
+    Screen a universe, prefilter by liquidity, score each name with the tool's
+    own deterministic signals, rank by composite setup score, truncate to
+    `num`. 15-minute TTL cache; the cache holds the full ranking so a smaller
+    `num` reslices without recomputing.
+
+    Parameters
+    ----------
+    num : int, optional
+        Number of setups to return; defaults to `MAX_TICKERS_TO_ANALYZE`.
+
+    Returns
+    -------
+    dict[str, dict]
+        Ordered `{ticker: {status, fund, wyckoff, setup_score, why}}` so
+        `state.py` can reuse the scores on the cards without re-fetching;
+        empty on an empty universe.
+    """
+    with _yf_lock:
+        cached = _yf_setup_cache.get(_SETUP_CACHE_KEY)
+    if cached is not None:
+        logger.info("setups (cached) {}", list(cached)[:num])
+        return dict(list(cached.items())[:num])
+
+    quotes_by_sym, trending = _screen_universe()
+    if not quotes_by_sym and not trending:
+        logger.warning("setup discovery: empty universe")
+        return {}
+    prefiltered = _prefilter_by_dollar_volume(quotes_by_sym, trending, _PREFILTER_N)
+
+    try:
+        regime_label = get_market_regime().get("label")
+    except Exception as e:
+        logger.warning("setup discovery regime fetch failed: {}", e)
+        regime_label = None
+
+    ohlcv = fetch_ohlcv_batch(prefiltered)
+
+    scored: dict[str, dict] = {}
+    lock = threading.Lock()
+
+    def _score_one(sym: str) -> None:
+        """Score one symbol and store the entry under `lock`.
+
+        Runs per-thread; swallows and logs any failure so one bad ticker
+        never sinks the batch.
+
+        Parameters
+        ----------
+        sym : str
+            Ticker to score.
+        """
+        try:
+            fund = score_fundamentals(fetch_fundamentals(sym))
+            wyckoff = score_wyckoff(compute_signals(ohlcv.get(sym)))
+            entry = {
+                "status": "pending",
+                "fund": fund,
+                "wyckoff": wyckoff,
+                "setup_score": _setup_score(fund, wyckoff, regime_label),
+                "why": _why_chip(fund, wyckoff, regime_label),
+            }
+            with lock:
+                scored[sym] = entry
+        except Exception as e:
+            logger.warning("setup score '{}' failed: {}", sym, e)
+
+    threads = [threading.Thread(target=_score_one, args=(s,), daemon=True) for s in prefiltered]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    ranked = sorted(scored.items(), key=lambda kv: kv[1]["setup_score"], reverse=True)
+    result = dict(ranked[:num])
+    logger.info(
+        "setups ranked (regime={}): {}",
+        regime_label,
+        [(s, e["setup_score"], e["why"]) for s, e in ranked[:num]],
+    )
 
     with _yf_lock:
-        _yf_trending_cache[_TRENDING_CACHE_KEY] = top
-
-    return {t: "pending" for t in top}
+        _yf_setup_cache[_SETUP_CACHE_KEY] = dict(ranked)
+    return result
 
 
 def get_trending_industries(num: int = 5) -> list[tuple[str, str]]:
