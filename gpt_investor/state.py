@@ -5,7 +5,14 @@ import markdown as md_lib
 import reflex as rx
 from loguru import logger
 
-from gpt_investor.storage.cache import get_cached, save_cached, get_cached_liquidity, record_verdict
+from gpt_investor.storage.cache import (
+    get_cached,
+    save_cached,
+    get_cached_liquidity,
+    record_verdict,
+    get_cached_explainer,
+    save_cached_explainer,
+)
 from gpt_investor.llm.verdict import (
     PROMPT_VERSION,
     parse_verdict,
@@ -18,6 +25,7 @@ from gpt_investor.llm.analysis import (
     get_final_analysis,
     get_liquidity_context,
 )
+from gpt_investor.llm.explainer import explain_verdict, EXPLAINER_VERSION
 from gpt_investor.data.market_data import (
     get_current_price,
     get_company_name,
@@ -404,6 +412,9 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    explainer_html: dict[str, str] = {} # ticker -> plain-English explanation (rendered HTML)
+    explainer_partial: dict[str, bool] = {}  # ticker -> True if built from incomplete inputs
+    explainer_loading: bool = False     # true while the open dialog's explainer is generating
     setup_why: dict[str, str] = {}      # ticker -> "Solid • accumulation • +regime" (setup discovery only)
     audit_label: dict[str, str] = {}    # ticker -> "agree"/"caution"/"disagree" (advisory)
     audit_color: dict[str, str] = {}    # ticker -> Radix color for the audit chip
@@ -436,6 +447,9 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_explainer_html: str = ""
+    selected_explainer_partial: bool = False
+    selected_explainer_failed: bool = False  # generation ran but produced nothing usable
     selected_setup_why: str = ""
     selected_audit_html: str = ""
     selected_audit_label: str = ""
@@ -498,6 +512,8 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.explainer_html = {}
+        self.explainer_partial = {}
         self.setup_why = {}
         self.audit_label = {}
         self.audit_color = {}
@@ -572,6 +588,56 @@ class State(rx.State):
         )
         self.selected_audit_label = self.audit_label.get(ticker, "")
         self.selected_audit_color = self.audit_color.get(ticker, "")
+        # Plain-English explainer: show any memoized copy immediately, then fire
+        # the background generator to fill it on a miss.
+        self.selected_explainer_html = self.explainer_html.get(ticker, "")
+        self.selected_explainer_partial = self.explainer_partial.get(ticker, False)
+        self.selected_explainer_failed = False
+        return State.generate_explainer
+
+    @rx.event(background=True)
+    async def generate_explainer(self):
+        """Generate (or load cached) the plain-English explainer for the open ticker.
+
+        Background event. Reads self.selected_ticker plus its rendered layer
+        blocks, then writes self.explainer_html / self.selected_explainer_html /
+        self.explainer_loading. No-op if no ticker is open or one is already cached.
+        """
+        async with self:
+            ticker = self.selected_ticker
+            if not ticker or self.explainer_html.get(ticker):
+                return
+            self.explainer_loading = True
+            fund = self.fund_block.get(ticker, "")
+            sent = self.sent_block.get(ticker, "")
+            wyck = self.wyck_block.get(ticker, "")
+            macro = self.liquidity_context
+            verdict = self.analyses.get(ticker, "")
+
+        # Any layer block absent → the synthesis can't speak to it, so the
+        # summary is partial. Track it to surface a warning in the dialog.
+        partial = not all([fund, sent, wyck, macro])
+
+        cached = await asyncio.to_thread(get_cached_explainer, ticker, EXPLAINER_VERSION)
+        if cached:
+            text = cached
+        else:
+            text = await asyncio.to_thread(explain_verdict, fund, sent, wyck, macro, verdict)
+            if text:
+                await asyncio.to_thread(save_cached_explainer, ticker, EXPLAINER_VERSION, text)
+
+        html = md_lib.markdown(text, extensions=["nl2br", "sane_lists"]) if text else ""
+        async with self:
+            if html:
+                self.explainer_html[ticker] = html
+                self.explainer_partial[ticker] = partial
+            if self.selected_ticker == ticker:
+                self.selected_explainer_html = html
+                self.selected_explainer_partial = partial if html else False
+                # No usable text (schema-invalid / CLI failure) → flag it so the
+                # dialog can say so instead of silently showing nothing.
+                self.selected_explainer_failed = not html
+            self.explainer_loading = False
 
     def close_ticker(self):
         self.selected_ticker = ""
@@ -587,6 +653,10 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_explainer_html = ""
+        self.selected_explainer_partial = False
+        self.selected_explainer_failed = False
+        self.explainer_loading = False
         self.selected_setup_why = ""
         self.selected_audit_html = ""
         self.selected_audit_label = ""
