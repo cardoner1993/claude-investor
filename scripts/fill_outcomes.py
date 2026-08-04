@@ -36,7 +36,18 @@ def _history(ticker: str):
     """Full split/dividend-ADJUSTED daily close history, fetched once per run.
 
     `auto_adjust=True` back-adjusts the whole series, so both endpoints of a
-    return sit on the same basis regardless of splits in between.
+    return sit on the same basis regardless of splits in between. Cached per
+    ticker; a failed fetch caches None.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol to fetch.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        The adjusted daily history, or None if the fetch failed.
     """
     if ticker in _hist_cache:
         return _hist_cache[ticker]
@@ -50,7 +61,20 @@ def _history(ticker: str):
 
 
 def _adj_close_near(ticker: str, target: date) -> float | None:
-    """Adjusted close on `target`, or the nearest day within ±_WINDOW."""
+    """Adjusted close on `target`, or the nearest day within ±_WINDOW.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol to look up.
+    target : date
+        Desired trading date; nearest available day is searched outward.
+
+    Returns
+    -------
+    float or None
+        The adjusted close, or None if no close falls within the window.
+    """
     df = _history(ticker)
     if df is None or df.empty:
         return None
@@ -65,8 +89,25 @@ def _adj_close_near(ticker: str, target: date) -> float | None:
 
 
 def _return_factor(ticker: str, capture: date, target: date) -> float | None:
-    """Split-adjusted total-return factor between capture and target dates
-    (`adj_target / adj_capture`), or None if either close is unavailable."""
+    """Split-adjusted total-return factor between capture and target dates.
+
+    Computes `adj_target / adj_capture` so a stored capture price can be scaled
+    to the horizon on one consistent basis.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol to look up.
+    capture : date
+        Verdict capture date (denominator).
+    target : date
+        Horizon date (numerator).
+
+    Returns
+    -------
+    float or None
+        The return factor, or None if either close is unavailable.
+    """
     a = _adj_close_near(ticker, capture)
     b = _adj_close_near(ticker, target)
     if a is None or b is None or a == 0:
@@ -75,6 +116,12 @@ def _return_factor(ticker: str, capture: date, target: date) -> float | None:
 
 
 def main() -> None:
+    """Backfill every elapsed horizon's NULL ticker/SPY outcome cells.
+
+    Iterates all horizons, selects rows whose window has passed and whose
+    outcome is still NULL, scales the capture price by the split-adjusted return
+    factor, and writes the result. Idempotent.
+    """
     today = date.today()
     filled = 0
     for price_col, days in _HORIZONS.items():

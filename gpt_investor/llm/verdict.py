@@ -25,8 +25,18 @@ _TARGET_RE = re.compile(r"\*\*Price Target\*\*:\s*\$([\d,]+(?:\.\d+)?)", re.IGNO
 def parse_verdict(sonnet_text: str) -> dict:
     """Extract `{verdict, confidence, price_target}` from the rendered markdown.
 
-    Returns Nones for any field that can't be found (e.g. an old cached row or
-    a "$n/a" target) — the caller stores what it gets.
+    Fields that can't be found (e.g. an old cached row or a "$n/a" target) come
+    back as None — the caller stores what it gets.
+
+    Parameters
+    ----------
+    sonnet_text : str
+        The verdict markdown produced by `render_verdict_markdown`.
+
+    Returns
+    -------
+    dict
+        `{"verdict": str | None, "confidence": str | None, "price_target": float | None}`.
     """
     if not sonnet_text:
         return {"verdict": None, "confidence": None, "price_target": None}
@@ -71,7 +81,18 @@ _GRADE_SCORES: dict[str, float] = {
 
 
 def parse_analyst_grade(analyst_ratings: str) -> str | None:
-    """Pull the `To Grade:` value out of `get_analyst_ratings` output."""
+    """Pull the `To Grade:` value out of `get_analyst_ratings` output.
+
+    Parameters
+    ----------
+    analyst_ratings : str
+        The analyst-ratings text block from `get_analyst_ratings`.
+
+    Returns
+    -------
+    str or None
+        The grade phrase, or None when absent, empty, or "N/A".
+    """
     if not analyst_ratings:
         return None
     m = re.search(r"To Grade:\s*(.+)", analyst_ratings)
@@ -84,7 +105,20 @@ def parse_analyst_grade(analyst_ratings: str) -> str | None:
 
 
 def analyst_grade_to_score(grade: str | None) -> float | None:
-    """Map an analyst grade phrase to a [-1, +1] score, or None if unknown."""
+    """Map an analyst grade phrase to a normalised score in [-1, +1].
+
+    Phrases are matched longest-first so "strong buy" wins over "buy".
+
+    Parameters
+    ----------
+    grade : str or None
+        Grade phrase from `parse_analyst_grade`.
+
+    Returns
+    -------
+    float or None
+        Score in [-1, +1], or None when the phrase is unrecognised or missing.
+    """
     if not grade:
         return None
     g = grade.strip().lower()
