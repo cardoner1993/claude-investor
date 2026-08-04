@@ -128,6 +128,9 @@ def _record_verdict_row(
         "verdict": parsed["verdict"],
         "confidence": parsed["confidence"],
         "price_target": parsed["price_target"],
+        "prob_up": parsed["prob_up"],
+        "prob_flat": parsed["prob_flat"],
+        "prob_down": parsed["prob_down"],
         "sonnet_text": final_analysis,
         "spy_at_capture": spy_price,
     })

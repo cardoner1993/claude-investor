@@ -19,6 +19,8 @@ def _make_verdict(**over) -> VerdictLLM:
         industry_addressed="tailwinds in the sector",
         macro_addressed="no impact",
         technical_addressed="markup phase confirmed timing",
+        prob_up=0.55, prob_flat=0.30, prob_down=0.15,
+        premortem="competition compresses margins faster than modeled",
     )
     base.update(over)
     return VerdictLLM(**base)
@@ -27,7 +29,12 @@ def _make_verdict(**over) -> VerdictLLM:
 def test_parse_verdict_roundtrips_rendered_markdown():
     md = render_verdict_markdown(_make_verdict(), current_price=120.0)
     parsed = parse_verdict(md)
-    assert parsed == {"verdict": "Buy", "confidence": "high", "price_target": 150.0}
+    assert parsed["verdict"] == "Buy"
+    assert parsed["confidence"] == "high"
+    assert parsed["price_target"] == 150.0
+    assert parsed["prob_up"] == 0.55
+    assert parsed["prob_flat"] == 0.30
+    assert parsed["prob_down"] == 0.15
 
 
 def test_parse_verdict_handles_na_target_and_sell():
@@ -41,7 +48,10 @@ def test_parse_verdict_handles_na_target_and_sell():
 
 
 def test_parse_verdict_empty():
-    assert parse_verdict("") == {"verdict": None, "confidence": None, "price_target": None}
+    assert parse_verdict("") == {
+        "verdict": None, "confidence": None, "price_target": None,
+        "prob_up": None, "prob_flat": None, "prob_down": None,
+    }
 
 
 def test_parse_analyst_grade():

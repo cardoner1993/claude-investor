@@ -20,13 +20,15 @@ __all__ = ["PROMPT_VERSION", "parse_verdict", "parse_analyst_grade", "analyst_gr
 _VERDICT_RE = re.compile(r"\*\*Verdict\*\*:\s*(Buy|Hold|Sell)", re.IGNORECASE)
 _CONF_RE = re.compile(r"\((low|med|high)\s+confidence\)", re.IGNORECASE)
 _TARGET_RE = re.compile(r"\*\*Price Target\*\*:\s*\$([\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_PROB_RE = re.compile(r"up\s+(\d+)%\s*/\s*flat\s+(\d+)%\s*/\s*down\s+(\d+)%", re.IGNORECASE)
 
 
 def parse_verdict(sonnet_text: str) -> dict:
-    """Extract `{verdict, confidence, price_target}` from the rendered markdown.
+    """Extract `{verdict, confidence, price_target, prob_up, prob_flat, prob_down}`
+    from the rendered markdown.
 
-    Fields that can't be found (e.g. an old cached row or a "$n/a" target) come
-    back as None — the caller stores what it gets.
+    Fields that can't be found (e.g. a pre-P5 cached row or a "$n/a" target)
+    come back as None — the caller stores what it gets.
 
     Parameters
     ----------
@@ -36,20 +38,27 @@ def parse_verdict(sonnet_text: str) -> dict:
     Returns
     -------
     dict
-        `{"verdict": str | None, "confidence": str | None, "price_target": float | None}`.
+        `{"verdict", "confidence", "price_target", "prob_up", "prob_flat",
+        "prob_down"}`, each value the parsed type or None.
     """
+    empty = {"verdict": None, "confidence": None, "price_target": None,
+             "prob_up": None, "prob_flat": None, "prob_down": None}
     if not sonnet_text:
-        return {"verdict": None, "confidence": None, "price_target": None}
+        return empty
 
     vm = _VERDICT_RE.search(sonnet_text)
     cm = _CONF_RE.search(sonnet_text)
     tm = _TARGET_RE.search(sonnet_text)
+    pm = _PROB_RE.search(sonnet_text)
 
-    verdict = vm.group(1).capitalize() if vm else None
-    confidence = cm.group(1).lower() if cm else None
-    price_target = float(tm.group(1).replace(",", "")) if tm else None
-
-    return {"verdict": verdict, "confidence": confidence, "price_target": price_target}
+    return {
+        "verdict": vm.group(1).capitalize() if vm else None,
+        "confidence": cm.group(1).lower() if cm else None,
+        "price_target": float(tm.group(1).replace(",", "")) if tm else None,
+        "prob_up": int(pm.group(1)) / 100 if pm else None,
+        "prob_flat": int(pm.group(2)) / 100 if pm else None,
+        "prob_down": int(pm.group(3)) / 100 if pm else None,
+    }
 
 
 # Grade phrases → normalised score in [-1, +1]. Checked longest-first so

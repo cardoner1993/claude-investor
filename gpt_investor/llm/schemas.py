@@ -8,12 +8,15 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from gpt_investor.llm.probability import render_probability_block
+
 # Bumped whenever `get_final_analysis`'s prompt / input set changes meaningfully.
 # Phase 2's verdict_history filters on this so calibration never mixes contracts;
 # verdict.py (P2) imports this constant rather than redefining it.
 #   v1 — fundamentals + sentiment + industry + macro/regime
 #   v2 — adds the Wyckoff timing layer + technical_addressed audit field (PW)
-PROMPT_VERSION = "v2"
+#   v3 — adds probabilistic distribution (up/flat/down) + pre-mortem (P5)
+PROMPT_VERSION = "v3"
 
 
 class SentimentLLM(BaseModel):
@@ -81,6 +84,18 @@ class VerdictLLM(BaseModel):
         description="How the Wyckoff price/volume phase informed the verdict, or 'no impact'",
     )
 
+    # P5 — probabilistic verdict. The three probabilities should roughly sum to
+    # 1; `normalize_probs` renormalises downstream so we don't hard-fail on a
+    # 0.55/0.30/0.20 that sums to 1.05.
+    prob_up: float = Field(ge=0.0, le=1.0, description="P(price up > +2% over the horizon)")
+    prob_flat: float = Field(ge=0.0, le=1.0, description="P(price within ±2%)")
+    prob_down: float = Field(ge=0.0, le=1.0, description="P(price down < -2%)")
+    premortem: str = Field(
+        min_length=10,
+        max_length=400,
+        description="Pre-mortem: assume the verdict is wrong 6 months out — the single most likely reason why",
+    )
+
 
 def render_verdict_markdown(v: VerdictLLM, current_price: float) -> str:
     """Render a `VerdictLLM` into the markdown shape callers + cache already expect."""
@@ -99,5 +114,8 @@ def render_verdict_markdown(v: VerdictLLM, current_price: float) -> str:
         f"- _Industry_: {v.industry_addressed}\n"
         f"- _Macro_: {v.macro_addressed}\n"
         # `technical_addressed` defaults on verdicts produced before PW shipped.
-        f"- _Technical_: {getattr(v, 'technical_addressed', 'no impact')}"
+        f"- _Technical_: {getattr(v, 'technical_addressed', 'no impact')}\n\n"
+        + render_probability_block(
+            v.prob_up, v.prob_flat, v.prob_down, v.premortem, current_price, v.price_target
+        )
     )
