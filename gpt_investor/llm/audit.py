@@ -24,19 +24,24 @@ _MIN_SIMILAR = 5
 
 
 def _ret(price, fwd) -> float | None:
-    """Fractional forward return between entry and realised price.
+    """Fractional forward return from entry to a realised later price.
+
+    `(fwd - price) / price` — e.g. entry 100, later 120 → 0.20 (+20%). Used to
+    label a past verdict as a win (return > 0) or loss when sampling similar
+    cases. Returns None when it can't be computed (missing price, or a zero
+    entry that would divide by zero) so unusable rows are skipped.
 
     Parameters
     ----------
     price : float | None
-        Entry price. Falsy or zero yields None.
+        Entry (capture) price. Missing/zero yields None.
     fwd : float | None
-        Realised forward price.
+        Realised forward price at the horizon.
 
     Returns
     -------
     float | None
-        `(fwd - price) / price`, or None when either input is missing/zero.
+        Fractional return (0.20 = +20%), or None when an input is missing/zero.
     """
     if not price or fwd is None or price == 0:
         return None
