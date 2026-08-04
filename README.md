@@ -5,6 +5,22 @@ Based on the [gpt-investor](https://github.com/mshumer/gpt-investor) by
 
 This is an app built using [Reflex](https://github.com/reflex-dev/reflex). The AI prompts, data fetching and processing logic are directly lifted from the [notebook](notebooks/Claude_Investor.ipynb). The UI elements and the reactivity are built using Reflex.
 
+## Overview
+
+Pick an industry (or a single company) and get a Buy/Hold/Sell verdict on the top names, each backed by evidence.
+
+The design principle: **deterministic Python does the scoring, the LLM only synthesises.** Fundamentals, price/volume timing, and the macro regime are scored in plain Python (repeatable, no hallucinated numbers); the model reads those scores and writes the verdict. A data layer then records each verdict and, once real returns come in, measures whether it was right.
+
+Per ticker, roughly:
+
+1. **Discover** candidates (Yahoo rankings, or a tool-scored setup funnel).
+2. **Score** — fundamentals (5-dim), Wyckoff timing, market regime, news sentiment (VADER + LLM), analyst ratings. All deterministic except sentiment.
+3. **Verdict** — one sonnet call weighs every score into a structured Buy/Hold/Sell that must address each input.
+4. **Cache + record** to SQLite (daily verdict cache; a `verdict_history` row for the feedback loop).
+5. **Feedback loop** — a nightly job fills in the real forward return vs SPY; a calibration script reports hit rate / alpha per bucket, so you can see which layers actually carry signal.
+
+All model calls go through the `claude` CLI (your Claude Code session), not an API key. See [`gpt_investor/README.md`](gpt_investor/README.md) for a file-by-file map.
+
 ## Prerequisites
 
 You need [Claude Code CLI](https://claude.ai/code) installed and logged in. No API key required — the app calls the `claude` CLI directly, which uses your existing Claude Code session for authentication.

@@ -251,6 +251,8 @@ def _fetch_fundamentals_raw(ticker: str) -> dict:
         "debt_to_equity":   info.get("debtToEquity"),  # % form: 100 = 1.0x
         "trailing_eps":     info.get("trailingEps"),
         "market_cap":       info.get("marketCap"),
+        "sector":           info.get("sector"),
+        "industry":         info.get("industry"),
     }
 
 
