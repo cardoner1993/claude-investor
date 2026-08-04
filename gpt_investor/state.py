@@ -66,8 +66,32 @@ def _resolve_single(query: str) -> dict[str, str]:
 
 def _record_verdict_row(ticker, price, scored, sentiment, analyst_ratings,
                         regime, wyck, final_analysis, spy_price):
-    """Capture a verdict-history row on the cache-miss path. Never blocks the
-    pipeline — record_verdict swallows its own DB errors."""
+    """Capture a verdict-history row on the cache-miss path.
+
+    No-ops when there's no verdict text. Never blocks the pipeline —
+    `record_verdict` swallows its own DB errors.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol being analysed.
+    price : float
+        Capture-time price.
+    scored : dict
+        Fundamental score bundle (`score`, `tier`, `raw`).
+    sentiment : dict
+        Quantified sentiment (`score`, `confidence`); may be another type.
+    analyst_ratings : str
+        Analyst-ratings text block to parse the grade from.
+    regime : dict or None
+        Market-regime bundle (`label`).
+    wyck : dict or None
+        Wyckoff bundle (`phase`, `score`).
+    final_analysis : str
+        Rendered verdict markdown; parsed for verdict/confidence/target.
+    spy_price : float or None
+        SPY benchmark price at capture.
+    """
     if not final_analysis:
         return
     parsed = parse_verdict(final_analysis)
