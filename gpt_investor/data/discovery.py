@@ -293,23 +293,69 @@ _NON_EQUITY_MARKERS = ("=", "^")
 
 
 def _is_equity_symbol(sym: str) -> bool:
-    """Reject FX (`EURUSD=X`), futures (`GC=F`) and indices (`^GSPC`)."""
+    """Test whether a symbol is a plain equity ticker.
+
+    Rejects FX (`EURUSD=X`), futures (`GC=F`) and indices (`^GSPC`).
+
+    Parameters
+    ----------
+    sym : str
+        Ticker symbol to check.
+
+    Returns
+    -------
+    bool
+        True if non-empty and free of non-equity markers.
+    """
     return bool(sym) and not any(m in sym for m in _NON_EQUITY_MARKERS)
 
 
 def _is_equity_quote(q: dict) -> bool:
+    """Test whether a yfinance quote is a plain equity.
+
+    Parameters
+    ----------
+    q : dict
+        yfinance quote with `quoteType` and `symbol` keys.
+
+    Returns
+    -------
+    bool
+        True if `quoteType` is EQUITY and the symbol passes `_is_equity_symbol`.
+    """
     return q.get("quoteType") == "EQUITY" and _is_equity_symbol(q.get("symbol", ""))
 
 
 def _dollar_volume(q: dict) -> float:
+    """Compute traded dollar-volume for a quote.
+
+    Falls back to 3-month average daily volume when live volume is absent.
+
+    Parameters
+    ----------
+    q : dict
+        yfinance quote with price and volume keys.
+
+    Returns
+    -------
+    float
+        Price times volume; 0.0 when either input is missing.
+    """
     px = q.get("regularMarketPrice") or 0
     vol = q.get("regularMarketVolume") or q.get("averageDailyVolume3Month") or 0
     return float(px) * float(vol)
 
 
 def _trending_endpoint() -> list[str]:
-    """Best-effort Yahoo trending-tickers endpoint. Returns [] on any failure —
-    it only widens the universe, so a miss is harmless."""
+    """Fetch Yahoo's trending-tickers endpoint, best-effort.
+
+    Only widens the candidate universe, so any failure is harmless.
+
+    Returns
+    -------
+    list[str]
+        Equity symbols from the trending feed; empty on any error.
+    """
     try:
         r = requests.get(
             "https://query1.finance.yahoo.com/v1/finance/trending/US",
@@ -329,8 +375,13 @@ def _trending_endpoint() -> list[str]:
 def _screen_universe() -> tuple[dict[str, dict], list[str]]:
     """Pull the candidate universe from Yahoo screens + trending endpoint.
 
-    Returns `(quotes_by_symbol, trending_symbols)`. Yahoo only *lists* here —
-    no ranking value is taken from the screen order.
+    Yahoo only *lists* here — no ranking value is taken from the screen order.
+
+    Returns
+    -------
+    tuple[dict[str, dict], list[str]]
+        `(quotes_by_symbol, trending_symbols)`; the first maps symbol to its
+        screen quote, the second is the trending-endpoint symbols.
     """
     quotes_by_sym: dict[str, dict] = {}
     for name in _SETUP_SCREENS:
@@ -348,8 +399,26 @@ def _screen_universe() -> tuple[dict[str, dict], list[str]]:
 
 
 def _prefilter_by_dollar_volume(quotes_by_sym: dict[str, dict], trending: list[str], top: int) -> list[str]:
-    """Top `top` symbols by dollar-volume, with trending equities force-included
-    (they widen coverage even without a screen quote to rank on)."""
+    """Rank the universe by dollar-volume, forcing trending equities in.
+
+    Trending symbols are prepended even without a screen quote to rank on, so
+    they widen coverage. Bounds the downstream fundamentals cost.
+
+    Parameters
+    ----------
+    quotes_by_sym : dict[str, dict]
+        Symbol to screen quote.
+    trending : list[str]
+        Trending symbols to force-include, in order.
+    top : int
+        Cap on the returned list length.
+
+    Returns
+    -------
+    list[str]
+        Up to `top` symbols: trending first, then remaining by descending
+        dollar-volume.
+    """
     ranked = sorted(quotes_by_sym.values(), key=_dollar_volume, reverse=True)
     out: list[str] = []
     seen: set[str] = set()
@@ -381,15 +450,45 @@ _REGIME_FIT = {
 
 
 def _regime_fit(fund_tier: str, wyckoff_phase: str, regime_label: str | None) -> float:
+    """Look up the timing bonus for a Wyckoff phase under a macro regime.
+
+    Parameters
+    ----------
+    fund_tier : str
+        Fundamentals tier (unused by the current table; kept for signature).
+    wyckoff_phase : str
+        Wyckoff phase, e.g. `accumulation`, `markup`.
+    regime_label : str | None
+        Macro-regime label; falls back to `mixed` when None or unknown.
+
+    Returns
+    -------
+    float
+        Bonus in percentage points; 0.0 for an unmapped phase.
+    """
     table = _REGIME_FIT.get(regime_label or "mixed", _REGIME_FIT["mixed"])
     return table.get(wyckoff_phase, 0.0)
 
 
 def _setup_score(fund: dict, wyckoff: dict, regime_label: str | None) -> float:
-    """Composite setup score: fundamentals + timing + regime fit + soft gate.
+    """Blend fundamentals, Wyckoff timing, regime fit and a soft gate.
 
     Soft gate (+1) rewards the ideal setup — a Solid/Strong company in
     accumulation or markup — without hard-excluding anything else.
+
+    Parameters
+    ----------
+    fund : dict
+        Fundamentals result with `score` and `tier` keys.
+    wyckoff : dict
+        Wyckoff result with `score` and `phase` keys.
+    regime_label : str | None
+        Macro-regime label passed through to `_regime_fit`.
+
+    Returns
+    -------
+    float
+        Composite setup score, rounded to 2 decimals.
     """
     base = 0.55 * fund.get("score", 0.0) + 0.45 * wyckoff.get("score", 0.0)
     fit = _regime_fit(fund.get("tier", ""), wyckoff.get("phase", ""), regime_label)
@@ -398,18 +497,46 @@ def _setup_score(fund: dict, wyckoff: dict, regime_label: str | None) -> float:
 
 
 def _why_chip(fund: dict, wyckoff: dict, regime_label: str | None) -> str:
+    """Build the short "why" label shown on a setup card.
+
+    Parameters
+    ----------
+    fund : dict
+        Fundamentals result with a `tier` key.
+    wyckoff : dict
+        Wyckoff result with a `phase` key.
+    regime_label : str | None
+        Macro-regime label used to derive the regime tag.
+
+    Returns
+    -------
+    str
+        `"<tier> • <phase> • <±/~regime>"`.
+    """
     fit = _regime_fit(fund.get("tier", ""), wyckoff.get("phase", ""), regime_label)
     regime_tag = "+regime" if fit > 0 else "-regime" if fit < 0 else "~regime"
     return f"{fund.get('tier', '?')} • {wyckoff.get('phase', '?')} • {regime_tag}"
 
 
 def get_setup_candidates(num: int = MAX_TICKERS_TO_ANALYZE) -> dict[str, dict]:
-    """Signal-driven discovery. Screen a universe, prefilter by liquidity, score
-    each name with the tool's own deterministic signals, rank by composite setup
-    score, truncate to `num`.
+    """Run signal-driven discovery and return the top setups.
 
-    Returns an ordered `{ticker: {status, fund, wyckoff, setup_score, why}}` so
-    `state.py` can reuse the scores on the cards without re-fetching. 15-min TTL.
+    Screen a universe, prefilter by liquidity, score each name with the tool's
+    own deterministic signals, rank by composite setup score, truncate to
+    `num`. 15-minute TTL cache; the cache holds the full ranking so a smaller
+    `num` reslices without recomputing.
+
+    Parameters
+    ----------
+    num : int, optional
+        Number of setups to return; defaults to `MAX_TICKERS_TO_ANALYZE`.
+
+    Returns
+    -------
+    dict[str, dict]
+        Ordered `{ticker: {status, fund, wyckoff, setup_score, why}}` so
+        `state.py` can reuse the scores on the cards without re-fetching;
+        empty on an empty universe.
     """
     with _yf_lock:
         cached = _yf_setup_cache.get(_SETUP_CACHE_KEY)
@@ -435,6 +562,16 @@ def get_setup_candidates(num: int = MAX_TICKERS_TO_ANALYZE) -> dict[str, dict]:
     lock = threading.Lock()
 
     def _score_one(sym: str) -> None:
+        """Score one symbol and store the entry under `lock`.
+
+        Runs per-thread; swallows and logs any failure so one bad ticker
+        never sinks the batch.
+
+        Parameters
+        ----------
+        sym : str
+            Ticker to score.
+        """
         try:
             fund = score_fundamentals(fetch_fundamentals(sym))
             wyckoff = score_wyckoff(compute_signals(ohlcv.get(sym)))
