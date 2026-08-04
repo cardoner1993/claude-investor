@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Offline test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: poetry
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      # `network`-marked tests hit live APIs (yfinance/FRED) and would flake in
+      # CI — run everything else. The `claude` CLI isn't available here either,
+      # but no offline test shells out to it.
+      - name: Run tests (offline)
+        run: poetry run pytest -m "not network" -q
