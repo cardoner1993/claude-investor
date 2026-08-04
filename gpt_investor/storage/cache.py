@@ -220,9 +220,18 @@ _VERDICT_OUTCOME_COLS = (
 def record_verdict(ticker: str, prompt_version: str, row: dict) -> None:
     """Insert one verdict-history row (cache-miss path only).
 
-    `row` may contain any of `_VERDICT_INPUT_COLS`; unknown keys are ignored.
     Idempotent per (ticker, date, prompt_version) — a same-day re-run keeps the
     first capture. Never raises into the pipeline; logs and swallows on failure.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol the verdict is for.
+    prompt_version : str
+        Prompt contract identifier, stored so calibration never mixes contracts.
+    row : dict
+        Input columns to store; may contain any of `_VERDICT_INPUT_COLS`, and
+        unknown keys are ignored.
     """
     today = date.today().isoformat()
     cols = ["ticker", "date", "created_at", "prompt_version"]
@@ -244,13 +253,24 @@ def record_verdict(ticker: str, prompt_version: str, row: dict) -> None:
 
 
 def verdicts_needing_outcome(price_col: str, spy_col: str) -> list[dict]:
-    """Rows where EITHER the ticker outcome (`price_col`) or its SPY benchmark
-    (`spy_col`) is still NULL — so a row whose ticker close filled but whose SPY
-    close missed its window still gets re-selected until both land.
+    """Rows where either the ticker or SPY outcome for a horizon is still NULL.
 
-    Returns dicts with id/ticker/date, the capture `price` + `spy_at_capture`
-    (the filler scales these by the split-adjusted return factor), and the
-    current values of the two outcome columns so it fills only the NULL one.
+    A row whose ticker close filled but whose SPY close missed its window keeps
+    getting re-selected until both land.
+
+    Parameters
+    ----------
+    price_col : str
+        Ticker outcome column for the horizon (must be in `_VERDICT_OUTCOME_COLS`).
+    spy_col : str
+        SPY benchmark column for the horizon (must be in `_VERDICT_OUTCOME_COLS`).
+
+    Returns
+    -------
+    list of dict
+        Dicts with id/ticker/date, the capture `price` + `spy_at_capture`, and
+        the current `price_val` / `spy_val` so the filler touches only the NULL
+        one.
     """
     for col in (price_col, spy_col):
         if col not in _VERDICT_OUTCOME_COLS:
@@ -268,7 +288,16 @@ def verdicts_needing_outcome(price_col: str, spy_col: str) -> list[dict]:
 
 
 def set_verdict_outcomes(row_id: int, updates: dict) -> None:
-    """Fill outcome/benchmark columns on one row. Ignores unknown keys."""
+    """Fill outcome/benchmark columns on one row.
+
+    Parameters
+    ----------
+    row_id : int
+        Primary key of the verdict-history row to update.
+    updates : dict
+        Column/value pairs to write; keys outside `_VERDICT_OUTCOME_COLS` are
+        ignored, and a no-op update is skipped.
+    """
     fields = {k: v for k, v in updates.items() if k in _VERDICT_OUTCOME_COLS}
     if not fields:
         return
@@ -282,7 +311,13 @@ def set_verdict_outcomes(row_id: int, updates: dict) -> None:
 
 
 def all_verdicts() -> list[dict]:
-    """Every verdict-history row as a dict (calibration reads this)."""
+    """Every verdict-history row as a dict (calibration reads this).
+
+    Returns
+    -------
+    list of dict
+        All rows, each keyed by column name.
+    """
     with _conn() as conn:
         cur = conn.execute("SELECT * FROM verdict_history")
         names = [d[0] for d in cur.description]

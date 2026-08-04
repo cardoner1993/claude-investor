@@ -24,12 +24,43 @@ _GROUP_FIELDS = ["fund_tier", "verdict", "sentiment_conf", "regime_label", "wyck
 
 
 def _ret(a: float | None, b: float | None) -> float | None:
+    """Simple return `(b - a) / a`, or None if either endpoint is missing.
+
+    Parameters
+    ----------
+    a : float or None
+        Start value (denominator).
+    b : float or None
+        End value.
+
+    Returns
+    -------
+    float or None
+        The fractional return, or None when `a` is missing/zero or `b` is missing.
+    """
     if a is None or b is None or a == 0:
         return None
     return (b - a) / a
 
 
 def _rows_with_return(verdicts: list[dict], horizon: int) -> list[dict]:
+    """Keep verdicts whose horizon outcome is filled, annotating return + alpha.
+
+    Rows without a computable forward return are dropped; `_alpha` is None when
+    the SPY benchmark is unavailable.
+
+    Parameters
+    ----------
+    verdicts : list of dict
+        Raw verdict-history rows.
+    horizon : int
+        Forward window in days (selects the `price_Nd` / `spy_Nd` columns).
+
+    Returns
+    -------
+    list of dict
+        The surviving rows, each with added `_ret` and `_alpha` keys.
+    """
     price_col, spy_col = f"price_{horizon}d", f"spy_{horizon}d"
     out = []
     for v in verdicts:
@@ -42,6 +73,19 @@ def _rows_with_return(verdicts: list[dict], horizon: int) -> list[dict]:
 
 
 def _agg(rows: list[dict]) -> tuple[int, float, float, float | None]:
+    """Aggregate a group of annotated rows into summary stats.
+
+    Parameters
+    ----------
+    rows : list of dict
+        Rows carrying `_ret` and `_alpha`, as produced by `_rows_with_return`.
+
+    Returns
+    -------
+    tuple of (int, float, float, float or None)
+        Count, mean return, hit rate (fraction with return > 0), and mean alpha
+        (None when no row has a benchmark).
+    """
     n = len(rows)
     mean_ret = sum(r["_ret"] for r in rows) / n
     hit = sum(1 for r in rows if r["_ret"] > 0) / n
@@ -51,6 +95,18 @@ def _agg(rows: list[dict]) -> tuple[int, float, float, float | None]:
 
 
 def _print_group(field: str, rows: list[dict]) -> None:
+    """Print a per-value breakdown of stats grouped by one field.
+
+    Buckets rows by `field` (missing values shown as "—") and prints N, mean
+    return, hit rate, and alpha for each, largest bucket first.
+
+    Parameters
+    ----------
+    field : str
+        Row key to group by.
+    rows : list of dict
+        Annotated rows from `_rows_with_return`.
+    """
     buckets: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
         buckets[r.get(field) or "—"].append(r)
@@ -63,6 +119,12 @@ def _print_group(field: str, rows: list[dict]) -> None:
 
 
 def main() -> None:
+    """Print the calibration report for one horizon and prompt version.
+
+    Parses CLI args (`--horizon`, `--prompt-version`), loads verdict history,
+    filters to the chosen prompt contract, and prints overall plus per-group
+    stats.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", type=int, default=30, choices=[7, 30, 90, 365],
                     help="return horizon for the yes/no calibration groups")
