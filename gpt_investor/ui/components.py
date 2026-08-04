@@ -322,7 +322,18 @@ def analysis_dialog() -> rx.Component:
                                 rx.text("Writing plain-English summary...", size="1", color="gray"),
                                 spacing="2", align="center", padding_bottom="1em",
                             ),
-                            rx.fragment(),
+                            rx.cond(
+                                State.selected_explainer_failed,
+                                rx.hstack(
+                                    rx.icon("circle-x", size=13, color="gray"),
+                                    rx.text(
+                                        "Plain-English summary couldn't be generated — see the full analysis below.",
+                                        size="1", color="gray",
+                                    ),
+                                    spacing="2", align="center", padding_bottom="1em",
+                                ),
+                                rx.fragment(),
+                            ),
                         ),
                     ),
                     rx.cond(

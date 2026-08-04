@@ -264,6 +264,7 @@ class State(rx.State):
     selected_wyck_color: str = ""
     selected_explainer_html: str = ""
     selected_explainer_partial: bool = False
+    selected_explainer_failed: bool = False  # generation ran but produced nothing usable
 
     @rx.var
     def all_done(self) -> bool:
@@ -391,6 +392,7 @@ class State(rx.State):
         # the background generator to fill it on a miss.
         self.selected_explainer_html = self.explainer_html.get(ticker, "")
         self.selected_explainer_partial = self.explainer_partial.get(ticker, False)
+        self.selected_explainer_failed = False
         return State.generate_explainer
 
     @rx.event(background=True)
@@ -432,6 +434,9 @@ class State(rx.State):
             if self.selected_ticker == ticker:
                 self.selected_explainer_html = html
                 self.selected_explainer_partial = partial if html else False
+                # No usable text (schema-invalid / CLI failure) → flag it so the
+                # dialog can say so instead of silently showing nothing.
+                self.selected_explainer_failed = not html
             self.explainer_loading = False
 
     def close_ticker(self):
@@ -450,6 +455,7 @@ class State(rx.State):
         self.selected_wyck_color = ""
         self.selected_explainer_html = ""
         self.selected_explainer_partial = False
+        self.selected_explainer_failed = False
         self.explainer_loading = False
 
     def handle_submit(self, data: dict):
