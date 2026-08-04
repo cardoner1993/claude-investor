@@ -252,29 +252,28 @@ def record_verdict(ticker: str, prompt_version: str, row: dict) -> None:
         logger.warning("[{}] record_verdict failed: {}", ticker, e)
 
 
-def verdicts_needing_outcome(price_col: str, spy_col: str) -> list[dict]:
-    """Rows where either the ticker or SPY outcome for a horizon is still NULL.
+def verdicts_needing_outcome(horizon: int) -> list[dict]:
+    """Rows whose forward return at `horizon` days is not yet fully filled.
 
-    A row whose ticker close filled but whose SPY close missed its window keeps
-    getting re-selected until both land.
+    A row is returned if either its ticker close OR its SPY close for this
+    horizon is still NULL, so a row whose ticker leg filled but whose SPY leg
+    missed its window keeps getting re-selected until both land.
 
     Parameters
     ----------
-    price_col : str
-        Ticker outcome column for the horizon (must be in `_VERDICT_OUTCOME_COLS`).
-    spy_col : str
-        SPY benchmark column for the horizon (must be in `_VERDICT_OUTCOME_COLS`).
+    horizon : int
+        One of 7, 30, 90, 365 — selects the `price_<h>d` / `spy_<h>d` columns.
 
     Returns
     -------
     list of dict
-        Dicts with id/ticker/date, the capture `price` + `spy_at_capture`, and
-        the current `price_val` / `spy_val` so the filler touches only the NULL
-        one.
+        One dict per row: `id`, `ticker`, `date`, the capture `price` and
+        `spy_at_capture`, plus `price_filled` / `spy_filled` (the current column
+        values, None if not yet filled) so the caller writes only the NULL leg.
     """
-    for col in (price_col, spy_col):
-        if col not in _VERDICT_OUTCOME_COLS:
-            raise ValueError(f"unknown outcome column: {col}")
+    price_col, spy_col = f"price_{horizon}d", f"spy_{horizon}d"
+    if price_col not in _VERDICT_OUTCOME_COLS:
+        raise ValueError(f"unknown horizon: {horizon}")
     with _conn() as conn:
         rows = conn.execute(
             f"SELECT id, ticker, date, price, spy_at_capture, {price_col}, {spy_col} "
@@ -282,7 +281,7 @@ def verdicts_needing_outcome(price_col: str, spy_col: str) -> list[dict]:
         ).fetchall()
     return [
         {"id": r[0], "ticker": r[1], "date": r[2], "price": r[3], "spy_at_capture": r[4],
-         "price_val": r[5], "spy_val": r[6]}
+         "price_filled": r[5], "spy_filled": r[6]}
         for r in rows
     ]
 

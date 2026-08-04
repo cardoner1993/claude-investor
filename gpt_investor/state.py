@@ -64,8 +64,17 @@ def _resolve_single(query: str) -> dict[str, str]:
     return {}
 
 
-def _record_verdict_row(ticker, price, scored, sentiment, analyst_ratings,
-                        regime, wyck, final_analysis, spy_price):
+def _record_verdict_row(
+    ticker: str,
+    price: float,
+    scored: dict,
+    sentiment: dict | str,
+    analyst_ratings: str,
+    regime: dict | None,
+    wyck: dict | None,
+    final_analysis: str,
+    spy_price: float | None,
+) -> None:
     """Capture a verdict-history row on the cache-miss path.
 
     No-ops when there's no verdict text. Never blocks the pipeline —
@@ -90,7 +99,13 @@ def _record_verdict_row(ticker, price, scored, sentiment, analyst_ratings,
     final_analysis : str
         Rendered verdict markdown; parsed for verdict/confidence/target.
     spy_price : float or None
-        SPY benchmark price at capture.
+        Price of SPY (the SPDR S&P 500 ETF, i.e. "the market") at capture.
+        Stored so the feedback loop can later compute alpha — whether this pick
+        beat the market over the horizon, not merely rose.
+
+    Returns
+    -------
+    None
     """
     if not final_analysis:
         return
@@ -580,9 +595,10 @@ class State(rx.State):
         # bundle, ~2-5s. Run every analysis (no cache; intraday data matters).
         regime_task = asyncio.create_task(asyncio.to_thread(get_market_regime))
 
-        # SPY at capture — benchmark baseline for verdict_history. Fetched once
-        # per run (not per ticker); the nightly filler compares each verdict's
-        # forward return against SPY's over the same window.
+        # SPY (SPDR S&P 500 ETF = "the market") price at capture — the benchmark
+        # baseline for verdict_history. Fetched once per run (not per ticker);
+        # the nightly filler compares each verdict's forward return against SPY's
+        # over the same window to compute alpha (did the pick beat the market).
         spy_task = asyncio.create_task(asyncio.to_thread(get_current_price, "SPY"))
 
         need_fetch = session_needs_liquidity and disk_liq is None

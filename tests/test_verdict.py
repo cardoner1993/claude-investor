@@ -96,7 +96,7 @@ def test_record_verdict_idempotent_per_day():
 def test_verdict_outcome_fill():
     cache.record_verdict("TESTZ", PROMPT_VERSION, {"price": 100.0, "spy_at_capture": 500.0})
     row_id = [r for r in cache.all_verdicts() if r["ticker"] == "TESTZ"][0]["id"]
-    needing = {r["id"] for r in cache.verdicts_needing_outcome("price_30d", "spy_30d")}
+    needing = {r["id"] for r in cache.verdicts_needing_outcome(30)}
     assert row_id in needing
     cache.set_verdict_outcomes(row_id, {"price_30d": 110.0, "spy_30d": 505.0, "bogus": 1})
     row = [r for r in cache.all_verdicts() if r["id"] == row_id][0]
