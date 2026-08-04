@@ -21,6 +21,8 @@ We normalise to a ratio inside _score_debt_equity.
 
 import yfinance as yf
 
+from gpt_investor.infra.resilience import resilient
+
 
 # --- per-dimension scoring helpers -----------------------------------------
 
@@ -322,7 +324,10 @@ def score_fundamentals(m: dict) -> dict:
 # --- data fetch ------------------------------------------------------------
 
 def fetch_fundamentals(ticker: str) -> dict:
-    """Pull raw fundamental metrics for one ticker from yfinance.
+    """Fundamentals with retry and last-good fallback.
+
+    Critical leg, so a transient `.info` failure serves the last-good metrics
+    and keeps the score chip alive instead of erroring the whole ticker.
 
     Parameters
     ----------
@@ -332,8 +337,28 @@ def fetch_fundamentals(ticker: str) -> dict:
     Returns
     -------
     dict
-        Normalised metrics keyed for `score_fundamentals` (P/E, growth, ROE,
-        margins, FCF, D/E in percent form, EPS, market cap).
+        Metrics dict from `_fetch_fundamentals_raw`, or the last-good value if degraded.
+    """
+    # Critical leg — retry + serve-last-good so the score chip survives a
+    # transient .info failure instead of erroring the whole ticker.
+    return resilient("fundamentals", _fetch_fundamentals_raw, ticker, key=ticker)
+
+
+def _fetch_fundamentals_raw(ticker: str) -> dict:
+    """Pull raw fundamental metrics from yfinance `.info`.
+
+    Raw fetch with no resilience; wrap via `fetch_fundamentals`. `debt_to_equity`
+    stays in yfinance percentage form (100 = 1.0x).
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    dict
+        Metrics keyed for `score_fundamentals`; missing fields are None.
     """
     info = yf.Ticker(ticker).info
     return {
@@ -352,6 +377,8 @@ def fetch_fundamentals(ticker: str) -> dict:
         "debt_to_equity":   info.get("debtToEquity"),  # % form: 100 = 1.0x
         "trailing_eps":     info.get("trailingEps"),
         "market_cap":       info.get("marketCap"),
+        "sector":           info.get("sector"),
+        "industry":         info.get("industry"),
     }
 
 

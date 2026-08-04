@@ -5,13 +5,27 @@ import markdown as md_lib
 import reflex as rx
 from loguru import logger
 
-from gpt_investor.storage.cache import get_cached, save_cached, get_cached_liquidity
+from gpt_investor.storage.cache import (
+    get_cached,
+    save_cached,
+    get_cached_liquidity,
+    record_verdict,
+    get_cached_explainer,
+    save_cached_explainer,
+)
+from gpt_investor.llm.verdict import (
+    PROMPT_VERSION,
+    parse_verdict,
+    parse_analyst_grade,
+    analyst_grade_to_score,
+)
 from gpt_investor.llm.analysis import (
     get_sentiment_analysis,
     get_industry_analysis,
     get_final_analysis,
     get_liquidity_context,
 )
+from gpt_investor.llm.explainer import explain_verdict, EXPLAINER_VERSION
 from gpt_investor.data.market_data import (
     get_current_price,
     get_company_name,
@@ -21,16 +35,29 @@ from gpt_investor.data.market_data import (
 from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals, format_fundamentals
 from gpt_investor.data.market_regime import get_market_regime
 from gpt_investor.data.wyckoff import score_ticker as score_wyckoff_ticker, format_wyckoff
+from gpt_investor.data.signals import fetch_signals, format_signals
 from gpt_investor.data.sentiment import chip_label, chip_color, format_for_llm as format_sentiment_for_llm
 from gpt_investor.data.discovery import resolve_ticker_verbose as _resolve_verbose_fn
 from gpt_investor.data.discovery import (
     MAX_TICKERS_TO_ANALYZE,
     generate_ticker_ideas,
-    get_trending_tickers,
+    get_setup_candidates,
     get_trending_industries,
     resolve_ticker,
 )
 from gpt_investor.llm.claude import get_token_totals
+from gpt_investor.infra.resilience import reset_health, degraded_legs
+from gpt_investor.llm.audit import (
+    get_similar_past,
+    audit_financial,
+    audit_sentiment,
+    combine_audits,
+    enough_history,
+    log_gate,
+)
+
+# audit label -> Radix color_scheme for the advisory chip
+_AUDIT_COLORS = {"agree": "green", "caution": "amber", "disagree": "red"}
 
 # tier -> Radix color_scheme used for the fundamental-score badge on each card.
 _TIER_COLORS = {
@@ -80,12 +107,137 @@ def _resolve_single(query: str) -> dict[str, str]:
     return {}
 
 
+def _record_verdict_row(
+    ticker: str,
+    price: float,
+    scored: dict,
+    sentiment: dict | str,
+    analyst_ratings: str,
+    regime: dict | None,
+    wyck: dict | None,
+    final_analysis: str,
+    spy_price: float | None,
+) -> None:
+    """Capture a verdict-history row on the cache-miss path.
+
+    No-ops when there's no verdict text. Never blocks the pipeline —
+    `record_verdict` swallows its own DB errors.
+
+    Parameters
+    ----------
+    ticker : str
+        Symbol being analysed.
+    price : float
+        Capture-time price.
+    scored : dict
+        Fundamental score bundle (`score`, `tier`, `raw`).
+    sentiment : dict
+        Quantified sentiment (`score`, `confidence`); may be another type.
+    analyst_ratings : str
+        Analyst-ratings text block to parse the grade from.
+    regime : dict or None
+        Market-regime bundle (`label`).
+    wyck : dict or None
+        Wyckoff bundle (`phase`, `score`).
+    final_analysis : str
+        Rendered verdict markdown; parsed for verdict/confidence/target.
+    spy_price : float or None
+        Price of SPY (the SPDR S&P 500 ETF, i.e. "the market") at capture.
+        Stored so the feedback loop can later compute alpha — whether this pick
+        beat the market over the horizon, not merely rose.
+
+    Returns
+    -------
+    None
+    """
+    if not final_analysis:
+        return
+    parsed = parse_verdict(final_analysis)
+    grade = parse_analyst_grade(analyst_ratings)
+    raw = scored.get("raw", {})
+    record_verdict(ticker, PROMPT_VERSION, {
+        "price": price,
+        "fund_score": scored.get("score"),
+        "fund_tier": scored.get("tier"),
+        "sentiment_score": sentiment.get("score") if isinstance(sentiment, dict) else None,
+        "sentiment_conf": sentiment.get("confidence") if isinstance(sentiment, dict) else None,
+        "analyst_grade": grade,
+        "analyst_score": analyst_grade_to_score(grade),
+        "regime_label": regime.get("label") if regime else None,
+        "wyckoff_phase": wyck.get("phase") if wyck else None,
+        "wyckoff_score": wyck.get("score") if wyck else None,
+        "sector": raw.get("sector"),
+        "industry": raw.get("industry"),
+        "verdict": parsed["verdict"],
+        "confidence": parsed["confidence"],
+        "price_target": parsed["price_target"],
+        "prob_up": parsed["prob_up"],
+        "prob_flat": parsed["prob_flat"],
+        "prob_down": parsed["prob_down"],
+        "sonnet_text": final_analysis,
+        "spy_at_capture": spy_price,
+    })
+
+
+async def _run_audits(state, ticker, scored, regime, final_analysis, fund_block, sent_block):
+    """Advisory audit pass over a published verdict.
+
+    Isolated from the verdict lifecycle: the caller runs this only after the
+    verdict is published + persisted, inside its own try/except, so nothing here
+    can error or hide a finished verdict. Gated — returns early when too few
+    similar past cases exist. On success, writes the combined label/color/block
+    into state and refreshes the open dialog live.
+
+    Parameters
+    ----------
+    state : State
+        Reflex state to mutate with audit results.
+    ticker : str
+        Ticker under audit.
+    scored : dict
+        Fundamental score dict with `tier` and `raw.sector`.
+    regime : dict | None
+        Market-regime dict with `label`, or None.
+    final_analysis : str
+        Published verdict markdown to critique.
+    fund_block : str
+        Fundamental evidence block for the financial auditor.
+    sent_block : str
+        Sentiment evidence block for the sentiment auditor.
+    """
+    sector = scored.get("raw", {}).get("sector")
+    regime_label = regime.get("label") if regime else None
+    cases = await asyncio.to_thread(get_similar_past, sector, scored["tier"], regime_label)
+    log_gate(ticker, len(cases))
+    if not enough_history(cases):
+        return
+    fin_audit, sent_audit = await asyncio.gather(
+        asyncio.to_thread(audit_financial, final_analysis, fund_block, cases),
+        asyncio.to_thread(audit_sentiment, final_analysis, sent_block, cases),
+    )
+    combined = combine_audits(fin_audit, sent_audit)
+    color = _AUDIT_COLORS.get(combined["label"], "gray")
+    html = md_lib.markdown(combined["text"], extensions=["nl2br", "sane_lists"])
+    async with state:
+        state.audit_label[ticker] = combined["label"]
+        state.audit_color[ticker] = color
+        state.audit_block[ticker] = combined["text"]
+        # If the dialog is already open on this ticker, refresh it live.
+        if state.selected_ticker == ticker:
+            state.selected_audit_label = combined["label"]
+            state.selected_audit_color = color
+            state.selected_audit_html = html
+    _log(ticker, f"audit={combined['label']}")
+
+
 async def _analyze_ticker(
     state,
     ticker: str,
     industry_task: "asyncio.Task[str] | None",
     liquidity_context: str = "",
     regime: dict | None = None,
+    spy_price: float | None = None,
+    precomputed: dict | None = None,
 ):
     """Run the full analysis pipeline for one ticker and publish results to state.
 
@@ -107,6 +259,13 @@ async def _analyze_ticker(
         Global liquidity snapshot passed to the final analysis. Default "".
     regime : dict | None, optional
         Market-regime bundle passed to the final analysis. Default None.
+    spy_price : float | None, optional
+        SPY price at capture, recorded with the verdict for the feedback loop.
+        Default None.
+    precomputed : dict | None, optional
+        Setup-discovery entry ``{fund, wyckoff, why}`` when the ticker came from
+        `get_setup_candidates` — the live path reuses these scores instead of
+        re-fetching, and the "why" chip is published to the card. Default None.
     """
     ticker_start = time.time()
     try:
@@ -130,6 +289,10 @@ async def _analyze_ticker(
             )
             scored = score_fundamentals(fund_raw)
             fund_block = format_fundamentals(scored)
+            # Cached path stays cheap: fetch signals for the earnings banner but
+            # skip the peer-median fan-out (up to 8 extra .info calls) by passing
+            # fundamentals=None — peers move slowly and the live run has them.
+            signals = await asyncio.to_thread(fetch_signals, ticker, None)
             sentiment_dict = cached.get("sentiment_dict")
             final_analysis = cached["final_analysis"]
             async with state:
@@ -141,6 +304,10 @@ async def _analyze_ticker(
                 state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
                 state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
                 state.wyck_block[ticker] = format_wyckoff(wyck)
+                state.signals_block[ticker] = format_signals(signals)
+                state.earnings_banner[ticker] = signals.get("earnings_banner", "")
+                if precomputed:
+                    state.setup_why[ticker] = precomputed["why"]
                 if sentiment_dict:
                     state.sent_summary[ticker] = chip_label(sentiment_dict["score"], sentiment_dict["confidence"])
                     state.sent_color[ticker] = chip_color(sentiment_dict["score"], sentiment_dict["confidence"])
@@ -159,20 +326,34 @@ async def _analyze_ticker(
         news = await asyncio.to_thread(get_news, ticker)
         _log(ticker, f"got {len(news)} articles", time.time() - t)
 
-        _log(ticker, "running sentiment + ratings + price + fundamentals (parallel)")
-        t = time.time()
-        sentiment, analyst_ratings, price, name, fund_raw, wyck = await asyncio.gather(
-            asyncio.to_thread(get_sentiment_analysis, ticker, news),
-            asyncio.to_thread(get_analyst_ratings, ticker),
-            asyncio.to_thread(get_current_price, ticker),
-            asyncio.to_thread(get_company_name, ticker),
-            asyncio.to_thread(fetch_fundamentals, ticker),
-            asyncio.to_thread(score_wyckoff_ticker, ticker),
-        )
-        scored = score_fundamentals(fund_raw)
+        if precomputed:
+            _log(ticker, "running sentiment + ratings + price (parallel; fund/wyckoff reused)")
+            t = time.time()
+            sentiment, analyst_ratings, price, name = await asyncio.gather(
+                asyncio.to_thread(get_sentiment_analysis, ticker, news),
+                asyncio.to_thread(get_analyst_ratings, ticker),
+                asyncio.to_thread(get_current_price, ticker),
+                asyncio.to_thread(get_company_name, ticker),
+            )
+            scored = precomputed["fund"]
+            wyck = precomputed["wyckoff"]
+        else:
+            _log(ticker, "running sentiment + ratings + price + fundamentals (parallel)")
+            t = time.time()
+            sentiment, analyst_ratings, price, name, fund_raw, wyck = await asyncio.gather(
+                asyncio.to_thread(get_sentiment_analysis, ticker, news),
+                asyncio.to_thread(get_analyst_ratings, ticker),
+                asyncio.to_thread(get_current_price, ticker),
+                asyncio.to_thread(get_company_name, ticker),
+                asyncio.to_thread(fetch_fundamentals, ticker),
+                asyncio.to_thread(score_wyckoff_ticker, ticker),
+            )
+            scored = score_fundamentals(fund_raw)
         fund_block = format_fundamentals(scored)
         sent_block = format_sentiment_for_llm(sentiment)
         wyck_block = format_wyckoff(wyck)
+        signals = await asyncio.to_thread(fetch_signals, ticker, scored)
+        signals_block = format_signals(signals)
         _log(
             ticker,
             f"all parallel done  price={price:.2f}  fund={scored['tier']} {scored['score']}  "
@@ -191,6 +372,10 @@ async def _analyze_ticker(
             state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
             state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
             state.wyck_block[ticker] = wyck_block
+            state.signals_block[ticker] = signals_block
+            state.earnings_banner[ticker] = signals.get("earnings_banner", "")
+            if precomputed:
+                state.setup_why[ticker] = precomputed["why"]
 
         if state.cancel_requested:
             _log(ticker, "cancelled before sonnet")
@@ -213,11 +398,15 @@ async def _analyze_ticker(
         final_analysis = await asyncio.to_thread(
             get_final_analysis,
             ticker, price, sentiment, analyst_ratings,
-            industry_analysis, liquidity_context, scored, regime, wyck,
+            industry_analysis, liquidity_context, scored, regime, wyck, signals,
         )
         _log(ticker, "final analysis done", time.time() - t)
 
         save_cached(ticker, sentiment, analyst_ratings, final_analysis)
+        _record_verdict_row(
+            ticker, price, scored, sentiment, analyst_ratings,
+            regime, wyck, final_analysis, spy_price,
+        )
 
         totals = get_token_totals()
         async with state:
@@ -232,6 +421,17 @@ async def _analyze_ticker(
                 state.selected_analysis_html = md_lib.markdown(
                     final_analysis, extensions=["nl2br", "sane_lists"]
                 )
+
+        # Audit agents (advisory) — run AFTER the verdict is published + persisted,
+        # in their own try/except, so an audit failure (CLI hang, network) can
+        # never flip a finished verdict to "error" or hide it. Gated: needs >=5
+        # balanced similar past cases with realised returns, so this stays dark
+        # until verdict_history fills in.
+        if final_analysis:
+            try:
+                await _run_audits(state, ticker, scored, regime, final_analysis, fund_block, sent_block)
+            except Exception as e:
+                _log(ticker, f"audit failed (ignored): {e}")
 
         _log(ticker, "DONE", time.time() - ticker_start)
     except Exception as e:
@@ -262,6 +462,15 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    signals_block: dict[str, str] = {}  # ticker -> higher-signal markdown block (P4)
+    earnings_banner: dict[str, str] = {}  # ticker -> "EARNINGS IN 3D" (empty if >7d out)
+    explainer_html: dict[str, str] = {} # ticker -> plain-English explanation (rendered HTML)
+    explainer_partial: dict[str, bool] = {}  # ticker -> True if built from incomplete inputs
+    explainer_loading: bool = False     # true while the open dialog's explainer is generating
+    setup_why: dict[str, str] = {}      # ticker -> "Solid • accumulation • +regime" (setup discovery only)
+    audit_label: dict[str, str] = {}    # ticker -> "agree"/"caution"/"disagree" (advisory)
+    audit_color: dict[str, str] = {}    # ticker -> Radix color for the audit chip
+    audit_block: dict[str, str] = {}    # ticker -> audit markdown for the dialog
     liquidity_context: str = ""
     liquidity_html: str = ""
     liquidity_is_mock: bool = False
@@ -290,6 +499,15 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_signals_html: str = ""
+    selected_earnings_banner: str = ""
+    selected_explainer_html: str = ""
+    selected_explainer_partial: bool = False
+    selected_explainer_failed: bool = False  # generation ran but produced nothing usable
+    selected_setup_why: str = ""
+    selected_audit_html: str = ""
+    selected_audit_label: str = ""
+    selected_audit_color: str = ""
 
     @rx.var
     def all_done(self) -> bool:
@@ -360,6 +578,14 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.signals_block = {}
+        self.earnings_banner = {}
+        self.explainer_html = {}
+        self.explainer_partial = {}
+        self.setup_why = {}
+        self.audit_label = {}
+        self.audit_color = {}
+        self.audit_block = {}
         self.selected_ticker = ""
 
     def set_industry_input(self, value: str):
@@ -396,14 +622,14 @@ class State(rx.State):
         return State.fetch_analyses
 
     def trending_pick(self):
-        """Start a run over today's trending tickers from YF news mentions.
+        """Start a run over today's top setups (signal-scored discovery funnel).
 
         Returns
         -------
         EventSpec
             ``State.fetch_analyses`` to run the pipeline.
         """
-        self.industry = "Today's Trending"
+        self.industry = "Today's Setups"
         self.industry_input = ""
         self.discovery_mode = "trending"
         self.direct_yf_key = ""
@@ -470,6 +696,68 @@ class State(rx.State):
         )
         self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
+        signals_block = self.signals_block.get(ticker, "")
+        self.selected_signals_html = (
+            md_lib.markdown(signals_block, extensions=["nl2br", "sane_lists"]) if signals_block else ""
+        )
+        self.selected_earnings_banner = self.earnings_banner.get(ticker, "")
+        self.selected_setup_why = self.setup_why.get(ticker, "")
+        audit_block = self.audit_block.get(ticker, "")
+        self.selected_audit_html = (
+            md_lib.markdown(audit_block, extensions=["nl2br", "sane_lists"]) if audit_block else ""
+        )
+        self.selected_audit_label = self.audit_label.get(ticker, "")
+        self.selected_audit_color = self.audit_color.get(ticker, "")
+        # Plain-English explainer: show any memoized copy immediately, then fire
+        # the background generator to fill it on a miss.
+        self.selected_explainer_html = self.explainer_html.get(ticker, "")
+        self.selected_explainer_partial = self.explainer_partial.get(ticker, False)
+        self.selected_explainer_failed = False
+        return State.generate_explainer
+
+    @rx.event(background=True)
+    async def generate_explainer(self):
+        """Generate (or load cached) the plain-English explainer for the open ticker.
+
+        Background event. Reads self.selected_ticker plus its rendered layer
+        blocks, then writes self.explainer_html / self.selected_explainer_html /
+        self.explainer_loading. No-op if no ticker is open or one is already cached.
+        """
+        async with self:
+            ticker = self.selected_ticker
+            if not ticker or self.explainer_html.get(ticker):
+                return
+            self.explainer_loading = True
+            fund = self.fund_block.get(ticker, "")
+            sent = self.sent_block.get(ticker, "")
+            wyck = self.wyck_block.get(ticker, "")
+            macro = self.liquidity_context
+            verdict = self.analyses.get(ticker, "")
+
+        # Any layer block absent → the synthesis can't speak to it, so the
+        # summary is partial. Track it to surface a warning in the dialog.
+        partial = not all([fund, sent, wyck, macro])
+
+        cached = await asyncio.to_thread(get_cached_explainer, ticker, EXPLAINER_VERSION)
+        if cached:
+            text = cached
+        else:
+            text = await asyncio.to_thread(explain_verdict, fund, sent, wyck, macro, verdict)
+            if text:
+                await asyncio.to_thread(save_cached_explainer, ticker, EXPLAINER_VERSION, text)
+
+        html = md_lib.markdown(text, extensions=["nl2br", "sane_lists"]) if text else ""
+        async with self:
+            if html:
+                self.explainer_html[ticker] = html
+                self.explainer_partial[ticker] = partial
+            if self.selected_ticker == ticker:
+                self.selected_explainer_html = html
+                self.selected_explainer_partial = partial if html else False
+                # No usable text (schema-invalid / CLI failure) → flag it so the
+                # dialog can say so instead of silently showing nothing.
+                self.selected_explainer_failed = not html
+            self.explainer_loading = False
 
     def close_ticker(self):
         """Close the analysis dialog and clear all selected-ticker fields."""
@@ -486,6 +774,16 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_signals_html = ""
+        self.selected_earnings_banner = ""
+        self.selected_explainer_html = ""
+        self.selected_explainer_partial = False
+        self.selected_explainer_failed = False
+        self.explainer_loading = False
+        self.selected_setup_why = ""
+        self.selected_audit_html = ""
+        self.selected_audit_label = ""
+        self.selected_audit_color = ""
 
     def handle_submit(self, data: dict):
         """Start an industry run from the custom-industry form submission.
@@ -635,6 +933,7 @@ class State(rx.State):
         async with self:
             self.error_message = ""
         run_start = time.time()
+        reset_health()
         logger.info("=" * 50)
         if self.discovery_mode == "single":
             logger.info("run starting analysis for company: {}", self.company_query or self.industry)
@@ -651,7 +950,7 @@ class State(rx.State):
             disk_liq = await asyncio.to_thread(get_cached_liquidity)
 
         if self.discovery_mode == "trending":
-            discover = asyncio.to_thread(get_trending_tickers)
+            discover = asyncio.to_thread(get_setup_candidates)
         elif self.discovery_mode == "single":
             discover = asyncio.to_thread(_resolve_single, self.company_query)
         else:
@@ -660,6 +959,12 @@ class State(rx.State):
         # Market regime (VIX / yield curve / HY / DXY / gold) — cheap yfinance
         # bundle, ~2-5s. Run every analysis (no cache; intraday data matters).
         regime_task = asyncio.create_task(asyncio.to_thread(get_market_regime))
+
+        # SPY (SPDR S&P 500 ETF = "the market") price at capture — the benchmark
+        # baseline for verdict_history. Fetched once per run (not per ticker);
+        # the nightly filler compares each verdict's forward return against SPY's
+        # over the same window to compute alpha (did the pick beat the market).
+        spy_task = asyncio.create_task(asyncio.to_thread(get_current_price, "SPY"))
 
         need_fetch = session_needs_liquidity and disk_liq is None
         if need_fetch:
@@ -678,6 +983,15 @@ class State(rx.State):
                 liquidity_context = self.liquidity_context
                 liquidity_html = self.liquidity_html
         need_liquidity = need_fetch  # preserved name for downstream state update
+
+        # Setup discovery returns a rich {ticker: {status, fund, wyckoff, ...}}
+        # dict; split it into the plain {ticker: status} state map plus a
+        # per-ticker precomputed-score map the pipeline reuses (no re-fetch).
+        setups: dict[str, dict] = {}
+        if self.discovery_mode == "trending" and tickers_dict:
+            setups = tickers_dict
+            tickers_dict = {t: "pending" for t in setups}
+
         logger.info("run tickers: {}  ({:.1f}s)", list(tickers_dict.keys()), time.time() - t)
         logger.info("run liquidity: {}", liquidity_source)
 
@@ -727,13 +1041,19 @@ class State(rx.State):
         # Resolve market regime (started in parallel above). Skip-cached path
         # tickers don't need it (verdict already cached); live tickers consume it.
         regime: dict | None = None
+        spy_price: float | None = None
         if any_live:
             try:
                 regime = await regime_task
             except Exception as e:
                 logger.warning("market regime fetch failed: {}", e)
+            try:
+                spy_price = await spy_task
+            except Exception as e:
+                logger.warning("SPY benchmark fetch failed: {}", e)
         else:
             regime_task.cancel()
+            spy_task.cancel()
 
         totals = get_token_totals()
         async with self:
@@ -749,7 +1069,7 @@ class State(rx.State):
 
         t = time.time()
         await asyncio.gather(*[
-            _analyze_ticker(self, ticker, industry_task, liquidity_context, regime)
+            _analyze_ticker(self, ticker, industry_task, liquidity_context, regime, spy_price, setups.get(ticker))
             for ticker in tickers_dict
         ])
         logger.info("run all tickers done  ({:.1f}s)", time.time() - t)
@@ -761,5 +1081,8 @@ class State(rx.State):
             self.cache_read_tokens = totals["cache_read"]
             self.stage = "done"
 
-        logger.info("run COMPLETE  total={:.1f}s", time.time() - run_start)
+        degraded = degraded_legs()
+        if degraded:
+            logger.warning("run HEALTH: degraded legs this run: {}", degraded)
+        logger.info("run COMPLETE  total={:.1f}s  health={}", time.time() - run_start, degraded or "ok")
         logger.info("=" * 50)

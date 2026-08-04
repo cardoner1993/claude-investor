@@ -3,6 +3,8 @@ import yfinance as yf
 from bs4 import BeautifulSoup
 from loguru import logger
 
+from gpt_investor.infra.resilience import resilient
+
 
 def get_company_name(ticker: str) -> str:
     """Resolve a display name for a ticker via yfinance.
@@ -23,8 +25,10 @@ def get_company_name(ticker: str) -> str:
     return info.get("shortName") or info.get("longName") or ticker
 
 
-def get_current_price(ticker):
-    """Latest 1-minute close price for a ticker.
+def _get_current_price_raw(ticker):
+    """Latest 1-minute close from yfinance intraday history.
+
+    Raw fetch with no resilience; wrap via `get_current_price`.
 
     Parameters
     ----------
@@ -34,11 +38,32 @@ def get_current_price(ticker):
     Returns
     -------
     float
-        Most recent close from a 1-day, 1-minute history.
+        Most recent 1-minute close price.
     """
     stock = yf.Ticker(ticker)
     data = stock.history(period="1d", interval="1m")
     return data["Close"].iloc[-1]
+
+
+def get_current_price(ticker):
+    """Current price with retry and last-good fallback.
+
+    Price is a critical leg, so a transient Yahoo hiccup serves the last-good
+    value instead of blanking the card.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    float
+        Latest price, or the last-good value if the leg is degraded.
+    """
+    # Price is a critical leg — retry, then serve last-good on total failure
+    # so a transient Yahoo hiccup doesn't blank the whole card.
+    return resilient("price", _get_current_price_raw, ticker, key=ticker)
 
 
 def get_news(ticker: str) -> list:
