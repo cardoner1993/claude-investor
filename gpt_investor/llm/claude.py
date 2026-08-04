@@ -55,6 +55,67 @@ def get_token_totals() -> dict:
         }
 
 
+# --- cooperative cancel: kill in-flight CLI subprocesses ------------------
+# Every LLM call is a `claude` subprocess run in a worker thread; cancel can't
+# interrupt one from the async side. We register each live process so a user
+# cancel can terminate it immediately instead of waiting out its 180s timeout.
+_procs_lock = threading.Lock()
+_active_procs: set = set()
+_cancelled = threading.Event()
+
+
+def cancel_inflight() -> None:
+    """Signal cancel and terminate every running Claude CLI subprocess.
+
+    Called from the UI's cancel handler. Sets a flag so no *new* call starts,
+    and terminates in-flight ones so a run stops within a second or two rather
+    than after the current call's 180s timeout.
+    """
+    _cancelled.set()
+    with _procs_lock:
+        procs = list(_active_procs)
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
+def reset_cancel() -> None:
+    """Clear the cancel flag at the start of a fresh run."""
+    _cancelled.clear()
+
+
+def _run_cli(cmd: list[str], timeout: int) -> tuple[int, str, str]:
+    """Run the CLI as a *killable* subprocess, registered for cancel.
+
+    Parameters
+    ----------
+    cmd : list[str]
+        Full command to execute.
+    timeout : int
+        Seconds before the process is killed and TimeoutExpired raised.
+
+    Returns
+    -------
+    tuple[int, str, str]
+        (returncode, stdout, stderr).
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with _procs_lock:
+        _active_procs.add(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    finally:
+        with _procs_lock:
+            _active_procs.discard(proc)
+
+
 def _parse_stream_json(stdout: str) -> dict:
     """Parse the CLI's stream-json NDJSON into text, tool calls, URLs, usage.
 
@@ -194,16 +255,25 @@ def call_claude(
             cmd[sp_idx] = stricter
             logger.warning("retry attempt {} with stricter prompt (require_tools={})", attempt, require_tools)
 
+        if _cancelled.is_set():
+            logger.info("call_claude skipped — cancel in progress  model={}", model)
+            parsed = {"text": "", "tool_calls": [], "urls": [], "model_usage": {}}
+            break
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            returncode, stdout, stderr = _run_cli(cmd, 180)
         except subprocess.TimeoutExpired:
             logger.error("CLI TIMEOUT after 180s  model={}; returning empty", model)
             parsed = {"text": "", "tool_calls": [], "urls": [], "model_usage": {}}
             break
-        if result.returncode != 0:
-            stderr_tail = (result.stderr or "").strip().splitlines()[-3:]
-            logger.error("CLI non-zero exit ({})  stderr tail: {}", result.returncode, stderr_tail)
-        parsed = _parse_stream_json(result.stdout)
+        if _cancelled.is_set():
+            # We terminated this process via cancel — don't treat as an error.
+            logger.info("CLI terminated by cancel  model={}", model)
+            parsed = {"text": "", "tool_calls": [], "urls": [], "model_usage": {}}
+            break
+        if returncode != 0:
+            stderr_tail = (stderr or "").strip().splitlines()[-3:]
+            logger.error("CLI non-zero exit ({})  stderr tail: {}", returncode, stderr_tail)
+        parsed = _parse_stream_json(stdout)
 
         called = {tc["name"] for tc in parsed["tool_calls"]}
         if not require_tools or called.intersection(require_tools):

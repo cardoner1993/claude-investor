@@ -45,7 +45,7 @@ from gpt_investor.data.discovery import (
     get_trending_industries,
     resolve_ticker,
 )
-from gpt_investor.llm.claude import get_token_totals
+from gpt_investor.llm.claude import get_token_totals, cancel_inflight, reset_cancel
 from gpt_investor.infra.resilience import reset_health, degraded_legs
 from gpt_investor.llm.audit import (
     get_similar_past,
@@ -708,12 +708,11 @@ class State(rx.State):
         )
         self.selected_audit_label = self.audit_label.get(ticker, "")
         self.selected_audit_color = self.audit_color.get(ticker, "")
-        # Plain-English explainer: show any memoized copy immediately, then fire
-        # the background generator to fill it on a miss.
+        # Plain-English explainer: show any memoized copy, but DON'T auto-run it —
+        # the user triggers generation with a button in the dialog.
         self.selected_explainer_html = self.explainer_html.get(ticker, "")
         self.selected_explainer_partial = self.explainer_partial.get(ticker, False)
         self.selected_explainer_failed = False
-        return State.generate_explainer
 
     @rx.event(background=True)
     async def generate_explainer(self):
@@ -896,6 +895,9 @@ class State(rx.State):
         if self.stage != "analyzing":
             return
         self.cancel_requested = True
+        # Kill any in-flight Claude CLI subprocess so cancel takes effect in
+        # ~1s instead of waiting out the current call's 180s timeout.
+        cancel_inflight()
         logger.info("cancel requested by user")
 
     def _clear_pending(self):
@@ -934,6 +936,7 @@ class State(rx.State):
             self.error_message = ""
         run_start = time.time()
         reset_health()
+        reset_cancel()
         logger.info("=" * 50)
         if self.discovery_mode == "single":
             logger.info("run starting analysis for company: {}", self.company_query or self.industry)
