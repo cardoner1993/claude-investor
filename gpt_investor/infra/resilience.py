@@ -38,8 +38,33 @@ def with_retry(
     _sleep: Callable[[float], None] = time.sleep,
     **kwargs,
 ) -> T:
-    """Call `fn` with exponential backoff. Re-raises the last error if every
-    attempt fails. `_sleep` is injectable so tests don't actually wait."""
+    """Call `fn` with exponential backoff, re-raising the last error on total failure.
+
+    Delay grows by `backoff` after each miss. `_sleep` is injectable so tests
+    don't actually wait.
+
+    Parameters
+    ----------
+    fn : Callable[..., T]
+        Callable to invoke; `*args`/`**kwargs` are forwarded to it.
+    tries : int
+        Max attempts. Optional, default 3.
+    base_delay : float
+        Seconds to wait after the first failure. Optional, default 0.5.
+    backoff : float
+        Multiplier applied to the delay after each failed attempt. Optional, default 2.0.
+    exceptions : tuple[type[BaseException], ...]
+        Exception types treated as retryable. Optional, default (Exception,).
+    label : str or None
+        Name used in log lines; falls back to `fn.__name__`. Optional, default None.
+    _sleep : Callable[[float], None]
+        Sleep function, injectable for tests. Optional, default time.sleep.
+
+    Returns
+    -------
+    T
+        The value returned by the first successful call.
+    """
     name = label or getattr(fn, "__name__", "call")
     delay = base_delay
     last: BaseException | None = None
@@ -62,6 +87,20 @@ def safe_get(obj: Any, *path, default=None):
 
     Centralises the scattered `isinstance(x, dict)` / index-bounds checks. Int
     keys index into lists/tuples; anything else keys into dicts.
+
+    Parameters
+    ----------
+    obj : Any
+        Root object to traverse.
+    *path
+        Sequence of keys/indices to descend.
+    default : Any
+        Value returned on any miss. Optional, default None.
+
+    Returns
+    -------
+    Any
+        The nested value, or `default` if any step misses.
     """
     cur = obj
     for key in path:
@@ -81,6 +120,16 @@ def first_dict(seq: Any) -> dict:
 
     Guards the known `tool_use_result.results` gotcha where a trailing element
     is a bare prose string rather than a dict.
+
+    Parameters
+    ----------
+    seq : Any
+        A dict (returned as-is), a list/tuple to scan, or anything else.
+
+    Returns
+    -------
+    dict
+        The sequence itself if a dict, the first dict element, or `{}`.
     """
     if isinstance(seq, dict):
         return seq
@@ -99,27 +148,59 @@ _degraded: set[str] = set()
 
 
 def reset_health() -> None:
-    """Clear the per-run degradation set (call at the start of a run)."""
+    """Clear the per-run degradation set.
+
+    Call at the start of a run so `degraded_legs()` reflects only this run.
+    """
     with _lock:
         _degraded.clear()
 
 
 def degraded_legs() -> list[str]:
+    """Sorted names of legs that served last-good this run.
+
+    Returns
+    -------
+    list[str]
+        Leg names marked degraded since the last `reset_health()`.
+    """
     with _lock:
         return sorted(_degraded)
 
 
 def _mark_degraded(leg: str) -> None:
+    """Record `leg` as degraded for this run.
+
+    Parameters
+    ----------
+    leg : str
+        Leg name to add to the degradation set.
+    """
     with _lock:
         _degraded.add(leg)
 
 
 def resilient(leg: str, fn: Callable[..., T], *args, key=None, **kwargs) -> T:
-    """Run a critical leg with retry; on total failure, serve the last good
-    value for `(leg, key)` if we have one, marking the leg degraded. Re-raises
-    only when there is no cached fallback.
+    """Run a critical leg with retry, serving the last-good value on total failure.
 
-    `key` defaults to the positional args (so per-ticker legs cache per ticker).
+    On success the value is cached under `(leg, key)`. On total failure the leg
+    is marked degraded and the cached value is served if present; otherwise the
+    error re-raises. `key` defaults to the positional args so per-ticker legs
+    cache per ticker.
+
+    Parameters
+    ----------
+    leg : str
+        Leg name for degradation tracking and last-good caching.
+    fn : Callable[..., T]
+        Callable to run under `with_retry`; `*args`/`**kwargs` are forwarded.
+    key : Any
+        Cache discriminator; falls back to `args`. Optional, default None.
+
+    Returns
+    -------
+    T
+        The fresh value, or the last-good value when the leg degrades.
     """
     cache_key = (leg, key if key is not None else args)
     try:

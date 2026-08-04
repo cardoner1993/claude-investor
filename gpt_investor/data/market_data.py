@@ -12,12 +12,41 @@ def get_company_name(ticker: str) -> str:
 
 
 def _get_current_price_raw(ticker):
+    """Latest 1-minute close from yfinance intraday history.
+
+    Raw fetch with no resilience; wrap via `get_current_price`.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    float
+        Most recent 1-minute close price.
+    """
     stock = yf.Ticker(ticker)
     data = stock.history(period="1d", interval="1m")
     return data["Close"].iloc[-1]
 
 
 def get_current_price(ticker):
+    """Current price with retry and last-good fallback.
+
+    Price is a critical leg, so a transient Yahoo hiccup serves the last-good
+    value instead of blanking the card.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    float
+        Latest price, or the last-good value if the leg is degraded.
+    """
     # Price is a critical leg — retry, then serve last-good on total failure
     # so a transient Yahoo hiccup doesn't blank the whole card.
     return resilient("price", _get_current_price_raw, ticker, key=ticker)

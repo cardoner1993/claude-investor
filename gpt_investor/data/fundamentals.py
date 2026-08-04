@@ -198,12 +198,42 @@ def score_fundamentals(m: dict) -> dict:
 # --- data fetch ------------------------------------------------------------
 
 def fetch_fundamentals(ticker: str) -> dict:
+    """Raw fundamentals with retry and last-good fallback.
+
+    Critical leg, so a transient `.info` failure serves the last-good metrics
+    and keeps the score chip alive instead of erroring the whole ticker.
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    dict
+        Metrics dict from `_fetch_fundamentals_raw`, or the last-good value if degraded.
+    """
     # Critical leg — retry + serve-last-good so the score chip survives a
     # transient .info failure instead of erroring the whole ticker.
     return resilient("fundamentals", _fetch_fundamentals_raw, ticker, key=ticker)
 
 
 def _fetch_fundamentals_raw(ticker: str) -> dict:
+    """Pull raw fundamental metrics from yfinance `.info`.
+
+    Raw fetch with no resilience; wrap via `fetch_fundamentals`. `debt_to_equity`
+    stays in yfinance percentage form (100 = 1.0x).
+
+    Parameters
+    ----------
+    ticker : str
+        Ticker symbol.
+
+    Returns
+    -------
+    dict
+        Metrics keyed for `score_fundamentals`; missing fields are None.
+    """
     info = yf.Ticker(ticker).info
     return {
         "trailing_pe":      info.get("trailingPE"),
