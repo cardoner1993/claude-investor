@@ -160,7 +160,7 @@ Unit-tested against synthetic metric dicts in `tests/test_fundamentals.py` (32 c
 
 ## LLM call conventions
 
-- `call_claude(system, user, model="haiku", tools=True, require_tools=None, max_retries=1)` in `claude.py` — all LLM calls go here
+- `call_claude(system, user, model="sonnet", tools=True, require_tools=None, max_retries=1)` in `claude.py` — all LLM calls go here. Model tiers: `opus` for the final Buy/Hold/Sell verdict (`get_final_analysis`), `sonnet` for everything else (sentiment, industry, liquidity commentary, audit, explainer, ticker-idea fallback). No path uses haiku.
 - Uses `--output-format stream-json --verbose` + `--allowed-tools WebSearch,WebFetch`; parses NDJSON line-by-line in `_parse_stream_json` to extract: final `result` text, every `tool_use` block, structured search-result URLs from `tool_use_result.results[].content[].url`, and `modelUsage`
 - `tools=False` for sentiment (content already supplied); `tools=True` (default) for industry, liquidity, final analysis
 - `require_tools=["WebSearch"]` on liquidity + industry. If the model returned text without invoking any required tool, `call_claude` retries once with `YOU MUST call one of these tools before answering...` prepended to the system prompt.

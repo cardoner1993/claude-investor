@@ -20,7 +20,7 @@ def test_explain_verdict_short_circuits_without_verdict(monkeypatch):
 def test_explain_verdict_builds_message_and_validates(monkeypatch):
     captured = {}
 
-    def _fake(schema, system, user, model="haiku", tools=True):
+    def _fake(schema, system, user, model="sonnet", tools=True):
         captured.update(schema=schema, user=user, tools=tools, model=model)
         return ExplanationLLM(explanation="  a validated plain-english synthesis paragraph.  ")
 
@@ -30,7 +30,7 @@ def test_explain_verdict_builds_message_and_validates(monkeypatch):
     )
     assert out == "a validated plain-english synthesis paragraph."   # stripped
     assert captured["schema"] is ExplanationLLM                       # schema-enforced
-    assert captured["tools"] is False and captured["model"] == "haiku"
+    assert captured["tools"] is False and captured["model"] == "sonnet"
     for token in ("FUND-BLOCK", "SENT-BLOCK", "WYCK-BLOCK", "MACRO-BLOCK", "VERDICT-MD"):
         assert token in captured["user"]
 

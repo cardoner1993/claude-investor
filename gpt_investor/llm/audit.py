@@ -1,6 +1,6 @@
 """Audit agents — advisory critique of a verdict vs similar past outcomes.
 
-Two specialist haiku agents look at the just-made verdict through disjoint
+Two specialist sonnet agents look at the just-made verdict through disjoint
 lenses (financial, sentiment) plus a balanced sample of *similar past cases
 and how they actually turned out*. Purely advisory — they never mutate the
 verdict; they surface an `agree / caution / disagree` chip and a note.
@@ -166,7 +166,7 @@ def format_cases(cases: list[dict]) -> str:
 
 
 def _run_agent(role: str, focus_block: str, verdict_md: str, cases: list[dict], lens: str) -> dict:
-    """Run one single-lens haiku auditor against the verdict and past cases.
+    """Run one single-lens sonnet auditor against the verdict and past cases.
 
     The agent sees only its own lens's evidence, never the other layers, so the
     two audits stay disjoint.
@@ -201,7 +201,7 @@ def _run_agent(role: str, focus_block: str, verdict_md: str, cases: list[dict], 
         f"{lens.capitalize()} evidence:\n{focus_block}\n\n"
         f"{format_cases(cases)}"
     )
-    parsed = call_claude_structured(AuditLLM, system_prompt, user_message, model="haiku", tools=False)
+    parsed = call_claude_structured(AuditLLM, system_prompt, user_message, model="sonnet", tools=False)
     if parsed is None:
         return {"label": "caution", "note": "audit unavailable (parse failed)"}
     return {"label": parsed.label, "note": parsed.note}
