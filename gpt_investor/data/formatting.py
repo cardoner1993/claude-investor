@@ -70,6 +70,18 @@ def format_signals(sig: dict) -> str:
                  + (f"  ⚠ {sig['earnings_banner']}" if sig.get("earnings_banner") else ""))
 
     lines.append(f"- Insider net flow: 30d {_fmt_flow(sig.get('insider_30d'))}, 90d {_fmt_flow(sig.get('insider_90d'))}")
+
+    inst = sig.get("institutional", {})
+    inst_pct = inst.get("inst_pct")
+    if inst_pct is not None or inst.get("n"):
+        net = inst.get("net_holder_change", 0)
+        direction = "accumulating" if net > 0 else "distributing" if net < 0 else "flat"
+        held = f"{inst_pct:.1%}" if inst_pct is not None else "n/a"
+        lines.append(
+            f"- Institutional ownership: {held} held; "
+            f"{inst.get('adders', 0)} adding / {inst.get('reducers', 0)} reducing "
+            f"({direction}, n={inst.get('n', 0)})"
+        )
     lines.append(
         f"- Multi-year trend: revenue CAGR {_fmt_pct(sig.get('rev_cagr'))}, "
         f"FCF CAGR {_fmt_pct(sig.get('fcf_cagr'))}, "
