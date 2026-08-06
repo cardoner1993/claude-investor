@@ -3,6 +3,7 @@ from loguru import logger
 
 from gpt_investor.state import State
 from gpt_investor.data.discovery import get_yf_industry_groups
+from gpt_investor.data.glossary import GLOSSARY, GROUPS, define
 
 _YF_INDUSTRY_GROUPS_FALLBACK: list[tuple[str, list[tuple[str, str]]]] = [
     ("Technology", [
@@ -189,22 +190,34 @@ def ticker_card(ticker_kv: list[str]) -> rx.Component:
             ),
             rx.cond(
                 fund_summary != "",
-                rx.badge(fund_summary, color_scheme=fund_color, variant="solid", radius="full", size="1"),
+                rx.tooltip(
+                    rx.badge(fund_summary, color_scheme=fund_color, variant="solid", radius="full", size="1"),
+                    content="Fundamental tier — deterministic 0–10 score across valuation, growth, profitability, cash, and balance.",
+                ),
                 rx.fragment(),
             ),
             rx.cond(
                 sent_summary != "",
-                rx.badge(sent_summary, color_scheme=sent_color, variant="soft", radius="full", size="1"),
+                rx.tooltip(
+                    rx.badge(sent_summary, color_scheme=sent_color, variant="soft", radius="full", size="1"),
+                    content=define("Sentiment score"),
+                ),
                 rx.fragment(),
             ),
             rx.cond(
                 wyck_summary != "",
-                rx.badge(wyck_summary, color_scheme=wyck_color, variant="outline", radius="full", size="1"),
+                rx.tooltip(
+                    rx.badge(wyck_summary, color_scheme=wyck_color, variant="outline", radius="full", size="1"),
+                    content="Wyckoff phase and 0–10 price/volume timing score — is now a good entry.",
+                ),
                 rx.fragment(),
             ),
             rx.cond(
                 audit_label != "",
-                rx.badge("audit: ", audit_label, color_scheme=audit_color, variant="soft", radius="full", size="1"),
+                rx.tooltip(
+                    rx.badge("audit: ", audit_label, color_scheme=audit_color, variant="soft", radius="full", size="1"),
+                    content=define("Audit"),
+                ),
                 rx.fragment(),
             ),
             rx.cond(
@@ -657,8 +670,80 @@ def confirm_resolution_panel() -> rx.Component:
     )
 
 
+def glossary_dialog() -> rx.Component:
+    """Deterministic glossary dialog — grouped term → definition → source link.
+
+    Built entirely from `data.glossary` constants (no state, no LLM). Opened by a
+    "?" button in the hero.
+
+    Returns
+    -------
+    rx.Component
+    """
+    return rx.dialog.root(
+        rx.dialog.trigger(
+            rx.button(
+                rx.icon("circle-help", size=14),
+                "Glossary",
+                variant="ghost",
+                size="1",
+                color_scheme="gray",
+            ),
+        ),
+        rx.dialog.content(
+            rx.dialog.title("Glossary"),
+            rx.dialog.description(
+                "Plain-language definitions of the terms this app uses.",
+                size="1",
+                color="gray",
+                margin_bottom="0.5em",
+            ),
+            rx.scroll_area(
+                rx.vstack(
+                    *[
+                        rx.vstack(
+                            rx.heading(group, size="2", color="gray", margin_top="0.4em"),
+                            *[
+                                rx.hstack(
+                                    rx.link(
+                                        term,
+                                        href=GLOSSARY[term]["url"],
+                                        target="_blank",
+                                        rel="noopener noreferrer",
+                                        weight="bold",
+                                        size="1",
+                                        white_space="nowrap",
+                                    ),
+                                    rx.text(GLOSSARY[term]["definition"], size="1", color="gray"),
+                                    spacing="2",
+                                    align="start",
+                                )
+                                for term in terms
+                            ],
+                            spacing="1",
+                            align="start",
+                            width="100%",
+                        )
+                        for group, terms in GROUPS
+                    ],
+                    spacing="3",
+                    align="start",
+                    padding_right="1em",
+                ),
+                type="auto",
+                scrollbars="vertical",
+                max_height="60vh",
+            ),
+            rx.dialog.close(
+                rx.button("Close", variant="soft", margin_top="1em"),
+            ),
+            max_width="640px",
+        ),
+    )
+
+
 def hero() -> rx.Component:
-    """Build the page header: title, tagline, disclaimer badge.
+    """Build the page header: title, tagline, disclaimer badge, glossary button.
 
     Returns
     -------
@@ -667,7 +752,12 @@ def hero() -> rx.Component:
     return rx.vstack(
         rx.heading("Claude Investor", size="8", weight="bold"),
         rx.text("AI-powered investment analysis · powered by Claude Code", size="2", color="gray"),
-        rx.badge("Not financial advice", color_scheme="amber", variant="surface", radius="full"),
+        rx.hstack(
+            rx.badge("Not financial advice", color_scheme="amber", variant="surface", radius="full"),
+            glossary_dialog(),
+            spacing="3",
+            align="center",
+        ),
         spacing="2",
         align="center",
     )
