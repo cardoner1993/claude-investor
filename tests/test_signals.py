@@ -79,15 +79,34 @@ def test_row_helpers_handle_nan_alignment():
     assert pairs == [(20.0, 100.0), (16.0, 80.0)]
 
 
+def test_score_institutional():
+    r = s.score_institutional(0.72, [0.1, -0.05, 0.2, None, float("nan"), 0.0])
+    assert r["inst_pct"] == 0.72
+    assert r["adders"] == 2 and r["reducers"] == 1
+    assert r["net_holder_change"] == 1  # accumulating
+    assert r["n"] == 4                   # None + NaN dropped, 0.0 kept as a change point
+    empty = s.score_institutional(None, [])
+    assert empty == {"inst_pct": None, "adders": 0, "reducers": 0, "net_holder_change": 0, "n": 0}
+
+
 def test_format_signals_smoke():
     sig = {
         "short": {"short_pct": 0.18, "crowded": True},
         "earnings_days": 3, "earnings_banner": "EARNINGS IN 3D",
         "insider_30d": 600000.0, "insider_90d": -200000.0,
+        "institutional": {"inst_pct": 0.72, "adders": 5, "reducers": 2, "net_holder_change": 3, "n": 7},
         "rev_cagr": 0.12, "fcf_cagr": 0.08, "op_margin_slope": 0.01,
         "peers": {"pe_median": 22.0, "n": 6, "pe_rel": {"ratio": 0.8, "cheaper": True}},
     }
     out = s.format_signals(sig)
     assert "crowded short" in out
     assert "EARNINGS IN 3D" in out
+    assert "Institutional ownership: 72.0% held" in out
+    assert "accumulating" in out
     assert "Peer valuation" in out
+
+
+def test_format_signals_omits_institutional_when_absent():
+    sig = {"short": {"short_pct": None, "crowded": False}, "peers": {}}
+    out = s.format_signals(sig)
+    assert "Institutional ownership" not in out

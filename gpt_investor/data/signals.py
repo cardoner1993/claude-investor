@@ -10,6 +10,7 @@ points and each degrades to an empty/None result on failure.
     B3 insider flow        — net 30/90d signed dollar flow
     B4 multi-year trend    — 4y revenue/FCF CAGR + margin slope
     B5 peer comparison     — industry-median fwd P/E / EV-EBITDA (megacap P/B fix)
+    B6 institutional own.  — % held by institutions + net holders adding/reducing
 
 Each signal is designed to earn a verdict_history column so calibration (P2)
 can measure its lift — wiring that column lives with the data layer (#4).
@@ -334,6 +335,45 @@ def fetch_peer_medians(industry_key: str, max_peers: int = 8) -> dict:
     return result
 
 
+# --- B6 institutional ownership --------------------------------------------
+
+def score_institutional(inst_pct, pct_changes) -> dict:
+    """Summarise institutional ownership and net position changes.
+
+    Institutions (funds, pensions, banks) that file 13F holdings. A high held-%
+    means the name is heavily owned by professional money; the net of holders
+    *adding* vs *reducing* their stake quarter-on-quarter hints at whether smart
+    money is accumulating or distributing. Both are laggy — 13F filings trail
+    the quarter by up to ~45 days — so treat this as positioning, not timing.
+
+    Pure — plain inputs so it unit-tests without yfinance.
+
+    Parameters
+    ----------
+    inst_pct : float | None
+        Fraction of shares held by institutions (0.72 = 72%).
+    pct_changes : list
+        Per-holder QoQ change in position size (fraction); None/NaN dropped.
+
+    Returns
+    -------
+    dict
+        `{inst_pct, adders, reducers, net_holder_change, n}` where
+        net_holder_change = adders − reducers (positive = net accumulation).
+    """
+    pct = _safe_float(inst_pct)
+    changes = [c for c in (_safe_float(x) for x in pct_changes or []) if c is not None]
+    adders = sum(1 for c in changes if c > 0)
+    reducers = sum(1 for c in changes if c < 0)
+    return {
+        "inst_pct": pct,
+        "adders": adders,
+        "reducers": reducers,
+        "net_holder_change": adders - reducers,
+        "n": len(changes),
+    }
+
+
 # --- orchestration + fetch -------------------------------------------------
 
 def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
@@ -354,7 +394,7 @@ def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
     -------
     dict
         `{short, earnings_days, earnings_banner, insider_30d, insider_90d,
-        rev_cagr, fcf_cagr, op_margin_slope, peers}`.
+        institutional, rev_cagr, fcf_cagr, op_margin_slope, peers}`.
     """
     t = yf.Ticker(ticker)
     try:
@@ -386,6 +426,21 @@ def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
             insider_90 = net_insider_flow(rows, date.today(), 90)
     except Exception as e:
         logger.bind(ticker=ticker).debug("signals insider failed: {}", e)
+
+    institutional = score_institutional(None, [])
+    try:
+        inst_pct = None
+        mh = t.major_holders
+        if mh is not None and not mh.empty:
+            try:
+                inst_pct = _safe_float(mh.loc["institutionsPercentHeld"].iloc[0])
+            except (KeyError, IndexError, TypeError):
+                inst_pct = None
+        ih = t.institutional_holders
+        pct_changes = list(ih["pctChange"]) if (ih is not None and not ih.empty and "pctChange" in ih.columns) else []
+        institutional = score_institutional(inst_pct, pct_changes)
+    except Exception as e:
+        logger.bind(ticker=ticker).debug("signals institutional failed: {}", e)
 
     rev_cagr = fcf_cagr = op_margin_slope = None
     try:
@@ -427,6 +482,7 @@ def fetch_signals(ticker: str, fundamentals: dict | None = None) -> dict:
         "earnings_banner": earnings_banner(earnings_days),
         "insider_30d": insider_30,
         "insider_90d": insider_90,
+        "institutional": institutional,
         "rev_cagr": rev_cagr,
         "fcf_cagr": fcf_cagr,
         "op_margin_slope": op_margin_slope,
