@@ -232,7 +232,7 @@ def get_final_analysis(
             VerdictLLM,
             system_prompt,
             user_message,
-            model="sonnet",
+            model="opus",
             tools=False,
         )
     except Exception:
@@ -260,7 +260,7 @@ def _liquidity_commentary(snapshot_md: str) -> str:
     """Generate a one-paragraph equity implication from the rendered snapshot.
 
     The model only sees the rendered numbers — it cannot invent rates. Single
-    haiku call, no tools.
+    sonnet call, no tools.
 
     Parameters
     ----------
@@ -278,7 +278,7 @@ def _liquidity_commentary(snapshot_md: str) -> str:
         "Reference specific stances. No URLs, no preamble, no markdown headers."
     )
     try:
-        return call_claude(system_prompt, snapshot_md, model="haiku", tools=False).strip()
+        return call_claude(system_prompt, snapshot_md, model="sonnet", tools=False).strip()
     except Exception as e:
         logger.warning("liquidity commentary failed: {}", e)
         return ""

@@ -260,7 +260,7 @@ def _claude_tickers(industry: str, num_tickers: int) -> tuple[list[str], dict]:
         [
             "claude", "-p", user_message,
             "--system-prompt", system_prompt,
-            "--model", "haiku",
+            "--model", "sonnet",
             "--tools", "WebSearch,WebFetch",
             "--permission-mode", "bypassPermissions",
             "--no-session-persistence",

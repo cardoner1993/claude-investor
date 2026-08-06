@@ -1,6 +1,6 @@
 """Click-time plain-English explainer.
 
-When the user opens a ticker dialog, a single haiku call synthesises the
+When the user opens a ticker dialog, a single sonnet call synthesises the
 already-computed layers (fundamentals, sentiment, Wyckoff timing, macro) and
 the verdict into a short plain-English walkthrough of *why* the verdict is what
 it is. Synthesis only — no tools, no new analysis, no new numbers. The result
@@ -97,7 +97,7 @@ def explain_verdict(
 
     try:
         parsed = call_claude_structured(
-            ExplanationLLM, _SYSTEM_PROMPT, user_message, model="haiku", tools=False
+            ExplanationLLM, _SYSTEM_PROMPT, user_message, model="sonnet", tools=False
         )
     except Exception as e:
         logger.warning("explain_verdict failed: {}", e)

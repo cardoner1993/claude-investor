@@ -186,7 +186,7 @@ def _parse_stream_json(stdout: str) -> dict:
 def call_claude(
     system_prompt: str,
     user_message: str,
-    model: str = "haiku",
+    model: str = "sonnet",
     tools: bool = True,
     require_tools: list[str] | None = None,
     max_retries: int = 1,
@@ -205,7 +205,7 @@ def call_claude(
     user_message : str
         User prompt passed via ``-p``.
     model : str, optional
-        CLI model alias, default ``"haiku"``.
+        CLI model alias, default ``"sonnet"``.
     tools : bool, optional
         Allow WebSearch/WebFetch, default ``True``.
     require_tools : list[str] | None, optional
@@ -359,7 +359,7 @@ def call_claude_structured(
     schema: type[T],
     system_prompt: str,
     user_message: str,
-    model: str = "haiku",
+    model: str = "sonnet",
     tools: bool = False,
     require_tools: list[str] | None = None,
     max_schema_retries: int = 1,
@@ -379,7 +379,7 @@ def call_claude_structured(
     user_message : str
         User prompt.
     model : str, optional
-        CLI model alias, default ``"haiku"``.
+        CLI model alias, default ``"sonnet"``.
     tools : bool, optional
         Allow WebSearch/WebFetch, default ``False``.
     require_tools : list[str] | None, optional
