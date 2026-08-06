@@ -35,6 +35,11 @@ from gpt_investor.data.market_data import (
 from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamentals, format_fundamentals
 from gpt_investor.data.market_regime import get_market_regime
 from gpt_investor.data.wyckoff import score_ticker as score_wyckoff_ticker, format_wyckoff
+from gpt_investor.data.levels import (
+    score_ticker as score_levels_ticker,
+    format_levels,
+    chip_label as levels_chip,
+)
 from gpt_investor.data.signals import fetch_signals, format_signals
 from gpt_investor.data.sentiment import chip_label, chip_color, format_for_llm as format_sentiment_for_llm
 from gpt_investor.data.discovery import resolve_ticker_verbose as _resolve_verbose_fn
@@ -281,11 +286,12 @@ async def _analyze_ticker(
         cached = get_cached(ticker)
         if cached:
             _log(ticker, "cache hit — skipping pipeline")
-            price, name, fund_raw, wyck = await asyncio.gather(
+            price, name, fund_raw, wyck, levels = await asyncio.gather(
                 asyncio.to_thread(get_current_price, ticker),
                 asyncio.to_thread(get_company_name, ticker),
                 asyncio.to_thread(fetch_fundamentals, ticker),
                 asyncio.to_thread(score_wyckoff_ticker, ticker),
+                asyncio.to_thread(score_levels_ticker, ticker),
             )
             scored = score_fundamentals(fund_raw)
             fund_block = format_fundamentals(scored)
@@ -304,6 +310,9 @@ async def _analyze_ticker(
                 state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
                 state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
                 state.wyck_block[ticker] = format_wyckoff(wyck)
+                state.levels_summary[ticker] = levels_chip(levels)
+                state.levels_color[ticker] = _TIER_COLORS.get(levels["tier"], "gray")
+                state.levels_block[ticker] = format_levels(levels)
                 state.signals_block[ticker] = format_signals(signals)
                 state.earnings_banner[ticker] = signals.get("earnings_banner", "")
                 if precomputed:
@@ -352,7 +361,11 @@ async def _analyze_ticker(
         fund_block = format_fundamentals(scored)
         sent_block = format_sentiment_for_llm(sentiment)
         wyck_block = format_wyckoff(wyck)
-        signals = await asyncio.to_thread(fetch_signals, ticker, scored)
+        levels, signals = await asyncio.gather(
+            asyncio.to_thread(score_levels_ticker, ticker),
+            asyncio.to_thread(fetch_signals, ticker, scored),
+        )
+        levels_block = format_levels(levels)
         signals_block = format_signals(signals)
         _log(
             ticker,
@@ -372,6 +385,9 @@ async def _analyze_ticker(
             state.wyck_summary[ticker] = f"{wyck['phase']} {wyck['score']}"
             state.wyck_color[ticker] = _TIER_COLORS.get(wyck["tier"], "gray")
             state.wyck_block[ticker] = wyck_block
+            state.levels_summary[ticker] = levels_chip(levels)
+            state.levels_color[ticker] = _TIER_COLORS.get(levels["tier"], "gray")
+            state.levels_block[ticker] = levels_block
             state.signals_block[ticker] = signals_block
             state.earnings_banner[ticker] = signals.get("earnings_banner", "")
             if precomputed:
@@ -398,7 +414,7 @@ async def _analyze_ticker(
         final_analysis = await asyncio.to_thread(
             get_final_analysis,
             ticker, price, sentiment, analyst_ratings,
-            industry_analysis, liquidity_context, scored, regime, wyck, signals,
+            industry_analysis, liquidity_context, scored, regime, wyck, signals, levels,
         )
         _log(ticker, "final analysis done", time.time() - t)
 
@@ -462,6 +478,9 @@ class State(rx.State):
     wyck_summary: dict[str, str] = {}   # ticker -> "markup 8.0"
     wyck_color: dict[str, str] = {}     # ticker -> color_scheme name (by tier)
     wyck_block: dict[str, str] = {}     # ticker -> markdown block for dialog
+    levels_summary: dict[str, str] = {} # ticker -> "S $92 / R $110"
+    levels_color: dict[str, str] = {}   # ticker -> color_scheme name (by tier)
+    levels_block: dict[str, str] = {}   # ticker -> markdown block for dialog
     signals_block: dict[str, str] = {}  # ticker -> higher-signal markdown block (P4)
     earnings_banner: dict[str, str] = {}  # ticker -> "EARNINGS IN 3D" (empty if >7d out)
     explainer_html: dict[str, str] = {} # ticker -> plain-English explanation (rendered HTML)
@@ -499,6 +518,9 @@ class State(rx.State):
     selected_wyck_html: str = ""
     selected_wyck_summary: str = ""
     selected_wyck_color: str = ""
+    selected_levels_html: str = ""
+    selected_levels_summary: str = ""
+    selected_levels_color: str = ""
     selected_signals_html: str = ""
     selected_earnings_banner: str = ""
     selected_explainer_html: str = ""
@@ -552,6 +574,9 @@ class State(rx.State):
         self.wyck_summary = {"MOCK": "markup 8.0"}
         self.wyck_color = {"MOCK": "green"}
         self.wyck_block = {"MOCK": "**Wyckoff timing: 8.0/10 (Strong) — phase: markup**\n_confirmed uptrend — buyers in control_\n\n- Trend: up (price +12.0% vs 200d SMA)\n- Volume: 5d/50d 1.80x (surge), up/down bias +30.0%"}
+        self.levels_summary = {"MOCK": "S $92 / R $110"}
+        self.levels_color = {"MOCK": "jade"}
+        self.levels_block = {"MOCK": "**Price levels: 7.0/10 (Solid)**\n\n- Resistance: $110.00 (52w high, str 3.0) (8.0% above)\n- Support: $92.00 (SMA50+pivot, str 4.0) (2.0% below)\n- Reward-to-risk (room up / drop to support): 4.0"}
         mock_liquidity = (
             "**Global Liquidity Snapshot**\n\n"
             "**Fed (US)**: 4.50% — neutral — Holding rates steady with gradual QT continuing.\n"
@@ -578,6 +603,9 @@ class State(rx.State):
         self.wyck_summary = {}
         self.wyck_color = {}
         self.wyck_block = {}
+        self.levels_summary = {}
+        self.levels_color = {}
+        self.levels_block = {}
         self.signals_block = {}
         self.earnings_banner = {}
         self.explainer_html = {}
@@ -696,6 +724,12 @@ class State(rx.State):
         )
         self.selected_wyck_summary = self.wyck_summary.get(ticker, "")
         self.selected_wyck_color = self.wyck_color.get(ticker, "")
+        levels_block = self.levels_block.get(ticker, "")
+        self.selected_levels_html = (
+            md_lib.markdown(levels_block, extensions=["nl2br", "sane_lists"]) if levels_block else ""
+        )
+        self.selected_levels_summary = self.levels_summary.get(ticker, "")
+        self.selected_levels_color = self.levels_color.get(ticker, "")
         signals_block = self.signals_block.get(ticker, "")
         self.selected_signals_html = (
             md_lib.markdown(signals_block, extensions=["nl2br", "sane_lists"]) if signals_block else ""
@@ -773,6 +807,9 @@ class State(rx.State):
         self.selected_wyck_html = ""
         self.selected_wyck_summary = ""
         self.selected_wyck_color = ""
+        self.selected_levels_html = ""
+        self.selected_levels_summary = ""
+        self.selected_levels_color = ""
         self.selected_signals_html = ""
         self.selected_earnings_banner = ""
         self.selected_explainer_html = ""
