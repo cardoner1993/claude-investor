@@ -7,6 +7,7 @@ from gpt_investor.data.fundamentals import fetch_fundamentals, score_fundamental
 from gpt_investor.data.macro import get_liquidity_snapshot, format_liquidity, snapshot_is_complete
 from gpt_investor.data.market_regime import format_regime
 from gpt_investor.data.wyckoff import format_wyckoff
+from gpt_investor.data.levels import format_levels
 from gpt_investor.data.signals import format_signals
 from gpt_investor.data.market_data import _fetch_article_text
 from gpt_investor.llm.schemas import SentimentLLM, VerdictLLM, render_verdict_markdown
@@ -149,6 +150,7 @@ def get_final_analysis(
     regime: dict | None = None,
     wyckoff: dict | None = None,
     signals: dict | None = None,
+    levels: dict | None = None,
 ):
     """Run the final Buy/Hold/Sell verdict through sonnet and render it.
 
@@ -177,6 +179,9 @@ def get_final_analysis(
     wyckoff : dict | None, optional
         Dict from ``wyckoff.score_wyckoff()`` — the deterministic price/volume
         timing layer; the model must address it when supplied. Default ``None``.
+    levels : dict | None, optional
+        Dict from ``levels.score_levels()`` — deterministic support/resistance;
+        rendered between the Wyckoff and macro blocks. Default ``None``.
 
     Returns
     -------
@@ -195,6 +200,7 @@ def get_final_analysis(
 
     regime_block = format_regime(regime) if regime else ""
     wyckoff_block = format_wyckoff(wyckoff) if wyckoff else ""
+    levels_block = format_levels(levels) if levels else ""
     signals_block = format_signals(signals) if signals else ""
 
     system_prompt = (
@@ -203,6 +209,10 @@ def get_final_analysis(
         "The Wyckoff timing score is also deterministic: treat it as the timing "
         "overlay on the fundamental case — a strong company in markdown/distribution "
         "is the right name at the wrong time; accumulation/markup confirms entry. "
+        "The support/resistance levels are also deterministic — read them as the "
+        "trade's geometry: buying just under strong resistance is poor reward-to-risk, "
+        "buying just off strong support with room above is favourable. Fold both the "
+        "Wyckoff and levels reads into `technical_addressed`. "
         "Emit ONE JSON object matching the schema. "
         "Thesis must reference the fundamental tier explicitly. "
         "For every `*_addressed` field, write ONE sentence on how that input "
@@ -221,6 +231,7 @@ def get_final_analysis(
         f"Analyst ratings:\n{analyst_ratings}\n\n"
         f"Industry context:\n{industry_analysis}\n\n"
         + (f"Technical / Wyckoff timing:\n{wyckoff_block}\n\n" if wyckoff_block else "")
+        + (f"Support / resistance levels:\n{levels_block}\n\n" if levels_block else "")
         + (f"{signals_block}\n\n" if signals_block else "")
         + (f"Macro liquidity context:\n{liquidity_context}\n\n" if liquidity_context else "")
         + (f"Market regime:\n{regime_block}\n\n" if regime_block else "")
